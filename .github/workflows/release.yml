@@ -4,10 +4,18 @@ on:
   release:
     types: [created]
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name for release (e.g., v1.0.0)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
 
 jobs:
   build-macos-arm64:
-    runs-on: macos-14  # Apple Silicon runner
+    runs-on: macos-14
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -21,14 +29,14 @@ jobs:
         run: |
           CGO_ENABLED=1 GOARCH=arm64 go build -o vkvm-darwin-arm64 ./cmd
 
-      - name: Upload macOS arm64 artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-arm64-binary
+          name: vkvm-darwin-arm64
           path: vkvm-darwin-arm64
 
   build-macos-amd64:
-    runs-on: macos-13  # Intel runner for native amd64 build
+    runs-on: macos-13
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -42,10 +50,10 @@ jobs:
         run: |
           CGO_ENABLED=1 GOARCH=amd64 go build -o vkvm-darwin-amd64 ./cmd
 
-      - name: Upload macOS amd64 artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-amd64-binary
+          name: vkvm-darwin-amd64
           path: vkvm-darwin-amd64
 
   build-windows:
@@ -63,26 +71,47 @@ jobs:
         run: |
           go build -ldflags "-H windowsgui" -o vkvm.exe ./cmd
 
-      - name: Upload Windows artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-binary
+          name: vkvm-windows-amd64
           path: vkvm.exe
 
   release:
     needs: [build-macos-arm64, build-macos-amd64, build-windows]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
-      - name: Upload Release Assets
-        uses: softprops/action-gh-release@v1
+      - name: Display structure of downloaded files
+        run: ls -la artifacts/
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          cp artifacts/vkvm-darwin-arm64/vkvm-darwin-arm64 release/
+          cp artifacts/vkvm-darwin-amd64/vkvm-darwin-amd64 release/
+          cp artifacts/vkvm-windows-amd64/vkvm.exe release/
+          ls -la release/
+
+      - name: Upload to Release (on tag push)
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
         with:
           files: |
-            macos-arm64-binary/vkvm-darwin-arm64
-            macos-amd64-binary/vkvm-darwin-amd64
-            windows-binary/vkvm.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            release/vkvm-darwin-arm64
+            release/vkvm-darwin-amd64
+            release/vkvm.exe
+
+      - name: Upload to Release (manual with tag)
+        if: github.event_name == 'workflow_dispatch' && inputs.tag_name != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag_name }}
+          files: |
+            release/vkvm-darwin-arm64
+            release/vkvm-darwin-amd64
+            release/vkvm.exe
