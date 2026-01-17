@@ -1,0 +1,40 @@
+{
+  "profiles": [
+    {
+      "name": "Windows PC",
+      "hotkey": "Ctrl+Alt+1",
+      "monitor_inputs": {
+        "776236CB-E781-416A-B419-7A65A34093C1": 17
+      },
+      "remote_hosts": [
+        {
+          "address": "192.168.1.100:8080",
+          "profile_name": "Windows PC"
+        }
+      ]
+    },
+    {
+      "name": "Mac",
+      "hotkey": "Ctrl+Alt+2",
+      "monitor_inputs": {
+        "776236CB-E781-416A-B419-7A65A34093C1": 18
+      },
+      "remote_hosts": [
+        {
+          "address": "192.168.1.100:8080",
+          "profile_name": "Mac"
+        }
+      ]
+    }
+  ],
+  "monitors": [],
+  "general": {
+    "start_on_boot": false,
+    "start_minimized": true,
+    "show_notifications": true,
+    "current_profile": "Mac",
+    "api_enabled": true,
+    "api_port": 18080,
+    "api_token": ""
+  }
+}

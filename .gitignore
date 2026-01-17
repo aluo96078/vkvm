@@ -1,0 +1,45 @@
+# Binaries
+bin/
+vkvm
+vkvm.exe
+vkvm_debug.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage tool
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+
+# Local config (user-specific)
+config.json
+
+# Embedded tools (except tracked ones)
+internal/embedded/tools/*.exe
+!internal/embedded/tools/.gitkeep
