@@ -44,7 +44,7 @@ Hardware KVM switches that support 2+ monitors and 2+ computers are prohibitivel
 ### From Source
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/vkvm.git
+git clone https://github.com/aluo96078/vkvm.git
 cd vkvm
 
 # Build for current platform

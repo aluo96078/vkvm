@@ -42,7 +42,7 @@
 ### 從原始碼編譯
 ```bash
 # 複製專案
-git clone https://github.com/yourusername/vkvm.git
+git clone https://github.com/aluo96078/vkvm.git
 cd vkvm
 
 # 編譯當前平台
