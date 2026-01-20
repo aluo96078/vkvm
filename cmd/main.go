@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -176,10 +177,84 @@ func runService(cfgMgr *config.Manager) {
 	// Tray instance
 	t := tray.New("VKVM - KVM Switcher")
 
+	// Debouncer for hotkeys
+	var lastHkTime time.Time
+	var hkMux sync.Mutex
+	debounce := func() bool {
+		hkMux.Lock()
+		defer hkMux.Unlock()
+		if time.Since(lastHkTime) < 500*time.Millisecond {
+			return false
+		}
+		lastHkTime = time.Now()
+		return true
+	}
+
 	// Helper to refresh hotkeys and tray menu on config change
 	refreshShortcuts := func() {
 		cfg := cfgMgr.Get()
 		hkMgr.Clear() // Clear existing registered callbacks
+
+		// Register global settings hotkey
+		if cfg.General.SettingsHotkey != "" {
+			_, err := hkMgr.Register(cfg.General.SettingsHotkey, func() {
+				if !debounce() {
+					return
+				}
+				log.Printf("Hotkey: Opening Settings UI...")
+				go runUI(cfgMgr)
+			})
+			if err != nil {
+				log.Printf("Warning: failed to register settings hotkey: %v", err)
+			}
+			
+			// Cross-platform mapping for settings hotkey
+			if runtime.GOOS == "darwin" && strings.Contains(strings.ToUpper(cfg.General.SettingsHotkey), "CTRL") {
+				cmdVariant := strings.ReplaceAll(strings.ToUpper(cfg.General.SettingsHotkey), "CTRL", "CMD")
+				hkMgr.Register(cmdVariant, func() {
+					if !debounce() {
+						return
+					}
+					log.Printf("Hotkey: Opening Settings UI...")
+					go runUI(cfgMgr)
+				})
+			}
+		}
+
+		// Register global sleep hotkey
+		if cfg.General.SleepHotkey != "" {
+			_, err := hkMgr.Register(cfg.General.SleepHotkey, func() {
+				if !debounce() {
+					return
+				}
+				log.Printf("Hotkey: Sleeping Displays...")
+				// Execute sleep in a separate goroutine so it doesn't block the hotkey thread
+				go func() {
+					if err := osutils.TurnOffDisplay(); err != nil {
+						log.Printf("Error sleeping displays: %v", err)
+					}
+				}()
+			})
+			if err != nil {
+				log.Printf("Warning: failed to register sleep hotkey: %v", err)
+			}
+			
+			// Cross-platform mapping for sleep hotkey
+			if runtime.GOOS == "darwin" && strings.Contains(strings.ToUpper(cfg.General.SleepHotkey), "CTRL") {
+				cmdVariant := strings.ReplaceAll(strings.ToUpper(cfg.General.SleepHotkey), "CTRL", "CMD")
+				hkMgr.Register(cmdVariant, func() {
+					if !debounce() {
+						return
+					}
+					log.Printf("Hotkey: Sleeping Displays...")
+					go func() {
+						if err := osutils.TurnOffDisplay(); err != nil {
+							log.Printf("Error sleeping displays: %v", err)
+						}
+					}()
+				})
+			}
+		}
 
 		for _, profile := range cfg.Profiles {
 			if profile.Hotkey == "" {
@@ -190,6 +265,9 @@ func runService(cfgMgr *config.Manager) {
 
 			// Register the original hotkey
 			_, err := hkMgr.Register(hotkey, func() {
+				if !debounce() {
+					return
+				}
 				log.Printf("Hotkey: Switching to %s...", pName)
 				if err := sw.SwitchToProfile(pName); err != nil {
 					log.Printf("Switch error: %v", err)
@@ -203,6 +281,9 @@ func runService(cfgMgr *config.Manager) {
 			if runtime.GOOS == "darwin" && strings.Contains(strings.ToUpper(hotkey), "CTRL") {
 				cmdVariant := strings.ReplaceAll(strings.ToUpper(hotkey), "CTRL", "CMD")
 				_, _ = hkMgr.Register(cmdVariant, func() {
+					if !debounce() {
+						return
+					}
 					log.Printf("Hotkey: Switching to %s...", pName)
 					if err := sw.SwitchToProfile(pName); err != nil {
 						log.Printf("Switch error: %v", err)

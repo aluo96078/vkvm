@@ -97,6 +97,12 @@ type GeneralConfig struct {
 
 	// ThisComputerIP is the IP address of this computer (auto-detected or manual)
 	ThisComputerIP string `json:"this_computer_ip,omitempty"`
+
+	// SettingsHotkey is the global hotkey to open the settings UI (e.g. "Ctrl+Alt+S")
+	SettingsHotkey string `json:"settings_hotkey,omitempty"`
+
+	// SleepHotkey is the global hotkey to put displays to sleep (e.g. "Ctrl+Alt+P")
+	SleepHotkey string `json:"sleep_hotkey,omitempty"`
 }
 
 // DefaultConfig returns a new Config with sensible defaults
@@ -123,6 +129,7 @@ func DefaultConfig() *Config {
 			APIEnabled:        true, // Ensure API is on by default for remote usage
 			APIPort:           18080,
 			Role:              "host",
+			SettingsHotkey:    "Ctrl+Alt+S",
 		},
 	}
 }

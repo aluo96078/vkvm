@@ -12,6 +12,38 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+const (
+	WM_SYSCOMMAND   = 0x0112
+	SC_MONITORPOWER = 0xF170
+	HWND_BROADCAST  = 0xffff
+	MONITOR_OFF     = 2
+)
+
+var (
+	// Reuse user32 from wake_windows.go if available, otherwise redefine here locally if needed.
+	// Since order of init is not guaranteed, safer to load what we need or use the one from wake_windows.go 
+	// assuming it's package level. But wake_windows.go vars are unexported (lowercase user32).
+	// So we should define our own to be safe and independent.
+	modUser32        = syscall.NewLazyDLL("user32.dll")
+	procPostMessageW = modUser32.NewProc("PostMessageW")
+)
+
+// TurnOffDisplay puts the monitor to sleep (low power mode)
+func TurnOffDisplay() error {
+	// PostMessage(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, MONITOR_OFF)
+	// We use PostMessage to avoid blocking if a window is hung.
+	ret, _, err := procPostMessageW.Call(
+		uintptr(HWND_BROADCAST),
+		uintptr(WM_SYSCOMMAND),
+		uintptr(SC_MONITORPOWER),
+		uintptr(MONITOR_OFF),
+	)
+	if ret == 0 {
+		return fmt.Errorf("PostMessage failed: %v", err)
+	}
+	return nil
+}
+
 // IsAdmin checks if the current process has administrative privileges
 func IsAdmin() bool {
 	var token windows.Token

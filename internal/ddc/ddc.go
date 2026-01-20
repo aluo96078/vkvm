@@ -18,6 +18,7 @@ const (
 type Monitor struct {
 	ID           string      `json:"id"`
 	Name         string      `json:"name"`
+	DeviceName   string      `json:"device_name,omitempty"`
 	Serial       string      `json:"serial,omitempty"`
 	InputSource  InputSource `json:"input_source"`
 	DDCSupported bool        `json:"ddc_supported"`
@@ -33,6 +34,9 @@ type Controller interface {
 
 	// SetInputSource switches a monitor to the specified input
 	SetInputSource(monitorID string, source InputSource) error
+
+	// SetPower set the monitor power state (true: On, false: Off/Standby)
+	SetPower(monitorID string, on bool) error
 
 	// TestDDCSupport tests if a monitor supports DDC/CI
 	TestDDCSupport(monitorID string) bool

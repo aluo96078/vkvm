@@ -134,6 +134,24 @@ func (c *macController) SetInputSource(monitorID string, source InputSource) err
 	return nil
 }
 
+// SetPower sets the monitor power state
+func (c *macController) SetPower(monitorID string, on bool) error {
+	// Try using 'power' keyword first if supported, or VCP D6
+	// m1ddc usually supports 'set power on/off' or 'set D6 <val>'
+	// We'll use D6 for consistency with Windows implementation (Standard VCP)
+	// 1 = On, 4 = Off/Standby
+	val := "4"
+	if on {
+		val = "1"
+	}
+	// Syntax: m1ddc display <id> set D6 <val>
+	cmd := exec.Command(c.toolPath, "display", monitorID, "set", "D6", val)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%w: %v", ErrCommandFailed, err)
+	}
+	return nil
+}
+
 // TestDDCSupport tests if a monitor supports DDC/CI by trying to read input source
 func (c *macController) TestDDCSupport(monitorID string) bool {
 	_, err := c.GetCurrentInput(monitorID)

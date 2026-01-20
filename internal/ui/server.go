@@ -17,6 +17,7 @@ import (
 	"vkvm/internal/config"
 	"vkvm/internal/ddc"
 	"vkvm/internal/network"
+	"vkvm/internal/osutils"
 	"vkvm/internal/switcher"
 )
 
@@ -46,6 +47,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/discover", s.handleUIDiscover)
 	mux.HandleFunc("/api/test-remote", s.handleTestRemote)
 	mux.HandleFunc("/api/sync-to", s.handleSyncTo)
+	mux.HandleFunc("/api/sleep-display", s.handleSleepDisplay)
 
 	// Find an available port
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -213,6 +215,18 @@ func (s *Server) handleTestRemote(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "OK")
 }
 
+// handleSleepDisplay turns off the display
+func (s *Server) handleSleepDisplay(w http.ResponseWriter, r *http.Request) {
+	log.Printf("UI: Requested display sleep")
+	if err := osutils.TurnOffDisplay(); err != nil {
+		log.Printf("Display sleep failed: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, "OK")
+}
+
 // handleSyncTo pushes local config to a remote VKVM instance
 func (s *Server) handleSyncTo(w http.ResponseWriter, r *http.Request) {
 	addr := r.URL.Query().Get("addr")
@@ -358,6 +372,10 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             transition: transform 0.2s, box-shadow 0.2s;
             font-size: 0.875rem;
         }
+        .btn-warning {
+             background: linear-gradient(135deg, #f6d365 0%, #fda085 100%);
+             color: #1e293b;
+        }
         .btn:hover { transform: translateY(-2px); box-shadow: 0 4px 20px rgba(102,126,234,0.4); }
         .btn-small {
             padding: 0.4rem 0.8rem;
@@ -438,6 +456,27 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                     <input type="checkbox" id="start-on-boot" onchange="updateGeneralConfig()">
                     <label style="margin: 0; cursor: pointer;">Start on Boot</label>
                 </div>
+            </div>
+            <div class="input-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.75rem;">
+                <div class="input-group">
+                    <label>Settings Hotkey:</label>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <input type="text" id="settings-hotkey" onchange="updateGeneralConfig()" placeholder="Ctrl+Alt+S" style="flex: 1;">
+                        <button class="btn btn-small" style="background: #ef4444;" onclick="startRecording('settings')">🔴 Record</button>
+                    </div>
+                </div>
+                <div class="input-group">
+                    <label>Sleep Hotkey:</label>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <input type="text" id="sleep-hotkey" onchange="updateGeneralConfig()" placeholder="Ctrl+Alt+P" style="flex: 1;">
+                        <button class="btn btn-small" style="background: #ef4444;" onclick="startRecording('sleep')">🔴 Record</button>
+                    </div>
+                </div>
+                <div class="input-group">
+                     <label>Power control:</label>
+                     <button class="btn btn-small btn-warning" onclick="sleepDisplay()">💤 Sleep Displays</button>
+                </div>
+            </div>
             </div>
             <div class="input-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 0.75rem;">
                 <div class="input-group">
@@ -532,6 +571,8 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             document.getElementById('api-port').value = config.general.api_port || 18080;
             document.getElementById('this-computer-ip').value = config.general.this_computer_ip || '';
             document.getElementById('start-on-boot').checked = config.general.start_on_boot;
+            document.getElementById('settings-hotkey').value = config.general.settings_hotkey || 'Ctrl+Alt+S';
+            document.getElementById('sleep-hotkey').value = config.general.sleep_hotkey || '';
             document.getElementById('role').value = config.general.role || 'host';
             document.getElementById('coordinator-addr').value = config.general.coordinator_addr || '';
             
@@ -551,6 +592,8 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             config.general.api_port = parseInt(document.getElementById('api-port').value) || 18080;
             config.general.this_computer_ip = document.getElementById('this-computer-ip').value;
             config.general.start_on_boot = document.getElementById('start-on-boot').checked;
+            config.general.settings_hotkey = document.getElementById('settings-hotkey').value;
+            config.general.sleep_hotkey = document.getElementById('sleep-hotkey').value;
             config.general.role = document.getElementById('role').value;
             config.general.coordinator_addr = document.getElementById('coordinator-addr').value;
         }
@@ -622,7 +665,7 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                         <div class="monitor-inputs">
                             ${monitors.map(m => ` + "`" + `
                                 <div class="input-group">
-                                    <label>${m.name}:</label>
+                                    <label>${(m.name && m.name.length>0) ? (m.name + (m.device_name ? ' ('+m.device_name+')' : '')) : (m.device_name || m.id)}:</label>
                                     <select data-profile-idx="${idx}" data-monitor-id="${m.id}" onchange="updateProfileMonitorInput(this)">
                                         <option value="">-</option>
                                         <option value="15" ${(profile.monitor_inputs && profile.monitor_inputs[m.id]==15)?'selected':''}>DP1</option>
@@ -654,7 +697,7 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                 <div style="padding: 0.75rem; background: rgba(255,255,255,0.03); border-radius: 8px; margin-bottom: 0.5rem;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
                         <div>
-                            <strong>${m.name}</strong> <span style="color: #94a3b8; font-size: 0.875rem;">(ID: ${m.id})</span>
+                            <strong>${(m.name && m.name.length>0) ? m.name : (m.device_name || m.id)}</strong> <span style="color: #94a3b8; font-size: 0.875rem;">${(m.name && m.name.length>0 && m.device_name) ? ' ('+m.device_name+')' : ' (ID: '+m.id+')'}</span>
                         </div>
                         <div style="font-size: 0.875rem;">
                             ${m.ddc_supported 
@@ -837,6 +880,16 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             }
         }
 
+        async function sleepDisplay() {
+            try {
+                const res = await fetch('/api/sleep-display', {method: 'POST'});
+                if (!res.ok) throw new Error('Action failed');
+                showStatus('Display entering sleep mode...');
+            } catch (e) {
+                showStatus('Sleep failed: ' + e.message, true);
+            }
+        }
+
         async function saveConfig() {
             try {
                 // Ensure latest general config (role, etc) is synced before sending
@@ -874,9 +927,17 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
         }
 
         function saveRecording() {
-            if (currentHotkey && recordingIdx !== -1) {
-                config.profiles[recordingIdx].hotkey = currentHotkey;
-                renderProfiles();
+            if (currentHotkey) {
+                if (recordingIdx === 'settings') {
+                    config.general.settings_hotkey = currentHotkey;
+                    renderGeneral();
+                } else if (recordingIdx === 'sleep') {
+                    config.general.sleep_hotkey = currentHotkey;
+                    renderGeneral();
+                } else if (recordingIdx !== -1) {
+                    config.profiles[recordingIdx].hotkey = currentHotkey;
+                    renderProfiles();
+                }
             }
             cancelRecording();
         }
