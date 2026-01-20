@@ -3,7 +3,6 @@ bin/
 vkvm
 vkvm.exe
 vkvm_debug.exe
-*.exe
 *.dll
 *.so
 *.dylib
