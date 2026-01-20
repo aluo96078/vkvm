@@ -1,0 +1,5 @@
+# Git LFS - Track documentation images
+# Users can clone without downloading these files
+# README will still display properly on GitHub
+docs/mac/*.png filter=lfs diff=lfs merge=lfs -text
+docs/windows/*.png filter=lfs diff=lfs merge=lfs -text

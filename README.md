@@ -68,6 +68,30 @@ GOOS=darwin GOARCH=arm64 go build -o vkvm ./cmd
 ./vkvm -ui
 ```
 
+### System Tray Usage
+
+VKVM runs in the system tray (menu bar on macOS, taskbar notification area on Windows). Right-click the tray icon to access the menu.
+
+#### macOS
+
+![macOS System Tray Menu](./docs/mac/taskbar.png)
+
+The menu bar icon provides quick access to:
+- **Switch profiles** - Click any profile name to switch immediately
+- **Settings...** - Open the configuration UI
+- **Quit** - Exit VKVM
+
+#### Windows
+
+![Windows System Tray Menu](./docs/windows/taskbar.png)
+
+Right-click the system tray icon to:
+- **Switch profiles** - Select any profile to switch
+- **Settings...** - Open the configuration UI
+- **Quit** - Exit VKVM
+
+> 💡 **Tip**: On Windows, you may need to click the "^" arrow in the taskbar to find the VKVM icon if it's hidden in the overflow area.
+
 ### Configuration
 
 1. **Open Settings**: Click the tray icon → "Settings..."
@@ -121,9 +145,6 @@ Agent machines will auto-sync profiles from the Host.
 - Enable DDC/CI in your monitor's OSD menu
 - Try running as Administrator
 - Check if ControlMyMonitor works manually
-
-### Windows: "DDC Supported" shows incorrectly in UI
-> ℹ️ **Known Issue**: On Windows, the DDC support detection may show "No" even for monitors that actually support DDC/CI. **This does not affect switching functionality** – if your monitor supports DDC, the input switching will still work correctly.
 
 ### Network: Agent can't connect to Host
 - Verify Host's API server is enabled

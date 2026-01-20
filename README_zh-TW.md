@@ -66,6 +66,30 @@ GOOS=darwin GOARCH=arm64 go build -o vkvm ./cmd
 ./vkvm -ui
 ```
 
+### 系統托盤使用
+
+VKVM 會在系統托盤運行（macOS 為選單列，Windows 為工作列通知區域）。右鍵點擊托盤圖示即可開啟選單。
+
+#### macOS
+
+![macOS 系統托盤選單](./docs/mac/taskbar.png)
+
+選單列圖示提供快速存取：
+- **切換 Profile** - 點擊任一 Profile 名稱立即切換
+- **Settings...** - 開啟設定介面
+- **Quit** - 結束 VKVM
+
+#### Windows
+
+![Windows 系統托盤選單](./docs/windows/taskbar.png)
+
+右鍵點擊系統托盤圖示可：
+- **切換 Profile** - 選擇任一 Profile 進行切換
+- **Settings...** - 開啟設定介面
+- **Quit** - 結束 VKVM
+
+> 💡 **提示**：在 Windows 上，如果 VKVM 圖示被隱藏在溢出區域，您可能需要點擊工作列中的「^」箭頭來找到它。
+
 ### 設定說明
 
 1. **開啟設定**：點擊托盤圖示 → "Settings..."
@@ -119,9 +143,6 @@ Agent 會自動從 Host 同步所有 Profile 設定。
 - 在螢幕 OSD 選單中啟用 DDC/CI
 - 嘗試以管理員身分執行
 - 確認 ControlMyMonitor 是否能手動操作
-
-### Windows：UI 中「DDC Supported」顯示不正確
-> ℹ️ **已知問題**：在 Windows 下，DDC 支援偵測可能會顯示「No」，即使螢幕實際支援 DDC/CI。**這不影響切換功能** – 如果您的螢幕支援 DDC，輸入源切換仍會正常運作。
 
 ### 網路：Agent 無法連線到 Host
 - 確認 Host 的 API 伺服器已啟用
