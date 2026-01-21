@@ -198,6 +198,38 @@ func vkCodeToName(vk uint32) string {
 		return "ENTER"
 	case 0x1B:
 		return "ESC"
+	case 0x08:
+		return "BACKSPACE"
+	case 0x09:
+		return "TAB"
+	case 0x14:
+		return "CAPSLOCK"
+	case 0x21:
+		return "PAGEUP"
+	case 0x22:
+		return "PAGEDOWN"
+	case 0x23:
+		return "END"
+	case 0x24:
+		return "HOME"
+	case 0x25:
+		return "LEFT"
+	case 0x26:
+		return "UP"
+	case 0x27:
+		return "RIGHT"
+	case 0x28:
+		return "DOWN"
+	case 0x2C:
+		return "PRINTSCREEN"
+	case 0x2D:
+		return "INSERT"
+	case 0x2E:
+		return "DELETE"
+	case 0x13:
+		return "PAUSE"
+	case 0x91:
+		return "SCROLLLOCK"
 	}
 
 	// Letters A-Z

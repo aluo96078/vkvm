@@ -230,6 +230,8 @@ func runService(cfgMgr *config.Manager) {
 				log.Printf("Hotkey: Sleeping Displays...")
 				// Execute sleep in a separate goroutine so it doesn't block the hotkey thread
 				go func() {
+					// Wait a bit to prevent immediate wake from key release
+					time.Sleep(500 * time.Millisecond)
 					if err := osutils.TurnOffDisplay(); err != nil {
 						log.Printf("Error sleeping displays: %v", err)
 					}
@@ -248,6 +250,8 @@ func runService(cfgMgr *config.Manager) {
 					}
 					log.Printf("Hotkey: Sleeping Displays...")
 					go func() {
+						// Wait a bit to prevent immediate wake from key release
+						time.Sleep(500 * time.Millisecond)
 						if err := osutils.TurnOffDisplay(); err != nil {
 							log.Printf("Error sleeping displays: %v", err)
 						}
