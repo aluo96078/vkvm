@@ -47,7 +47,9 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/discover", s.handleUIDiscover)
 	mux.HandleFunc("/api/test-remote", s.handleTestRemote)
 	mux.HandleFunc("/api/sync-to", s.handleSyncTo)
+	mux.HandleFunc("/api/sync-to", s.handleSyncTo)
 	mux.HandleFunc("/api/sleep-display", s.handleSleepDisplay)
+	mux.HandleFunc("/api/connection-status", s.handleConnectionStatus)
 
 	// Find an available port
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -276,6 +278,14 @@ func (s *Server) handleSyncTo(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "OK")
 }
 
+func (s *Server) handleConnectionStatus(w http.ResponseWriter, r *http.Request) {
+	connected := s.switcher.IsConnectedToCheck()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{
+		"connected": connected,
+	})
+}
+
 var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
@@ -488,7 +498,12 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                 </div>
                 <div class="input-group" id="coordinator-group">
                     <label>Coordinator Address (IP:Port):</label>
-                    <input type="text" id="coordinator-addr" onchange="updateGeneralConfig()" placeholder="e.g. 192.168.1.50:18080">
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <input type="text" id="coordinator-addr" onchange="updateGeneralConfig()" placeholder="e.g. 192.168.1.50:18080" style="flex: 1;">
+                        <div id="connection-status" style="display: none; padding: 0.5rem 1rem; border-radius: 8px; font-size: 0.875rem; font-weight: 600;">
+                            Checking...
+                        </div>
+                    </div>
                 </div>
             </div>
             </div>
@@ -564,6 +579,38 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             renderGeneral();
             renderProfiles();
             renderMonitors();
+            checkConnectionStatus();
+            
+            // Start polling status if agent
+            setInterval(checkConnectionStatus, 3000);
+        }
+
+        async function checkConnectionStatus() {
+            if (config.general.role !== 'agent') {
+                document.getElementById('connection-status').style.display = 'none';
+                return;
+            }
+            
+            try {
+                const res = await fetch('/api/connection-status');
+                const data = await res.json();
+                const el = document.getElementById('connection-status');
+                el.style.display = 'block';
+                
+                if (data.connected) {
+                    el.style.background = 'rgba(16, 185, 129, 0.2)';
+                    el.style.color = '#34d399';
+                    el.style.border = '1px solid rgba(16, 185, 129, 0.3)';
+                    el.innerHTML = '✅ Connected to Host';
+                } else {
+                    el.style.background = 'rgba(239, 68, 68, 0.2)';
+                    el.style.color = '#f87171';
+                    el.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+                    el.innerHTML = '❌ Disconnected';
+                }
+            } catch (e) {
+                // Ignore errors
+            }
         }
 
         function renderGeneral() {
@@ -641,24 +688,7 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                     </div>
 
 
-                    <div style="margin-top: 1rem;">
-                        <div style="font-size: 0.875rem; color: #a5b4fc; margin-bottom: 0.5rem; display: flex; justify-content: space-between;">
-                            <span>Remote Hosts (Notified when switching)</span>
-                            <button class="btn btn-small btn-secondary" style="padding: 0.2rem 0.5rem;" onclick="addRemoteHost(${idx})">+ Add</button>
-                        </div>
-                        <div id="remote-hosts-${idx}">
-                            ${(profile.remote_hosts || []).map((rv, rIdx) => ` + "`" + `
-                                <div style="display: flex; gap: 0.5rem; margin-bottom: 0.4rem;">
-                                    <input type="text" placeholder="IP:Port" value="${rv.address}" 
-                                           onchange="updateRemoteHostAddr(${idx}, ${rIdx}, this.value)" style="flex: 2;">
-                                    <input type="text" placeholder="Profile" value="${rv.profile_name}"
-                                           onchange="updateRemoteHostProfile(${idx}, ${rIdx}, this.value)" style="flex: 1;">
-                                    <button class="btn btn-small btn-secondary" onclick="testRemoteHost('${rv.address}')" title="Test Connection">⚡</button>
-                                    <button class="btn btn-small btn-danger" onclick="removeRemoteHost(${idx}, ${rIdx})">×</button>
-                                </div>
-                            ` + "`" + `).join('')}
-                        </div>
-                    </div>
+
 
                     <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid rgba(255,255,255,0.05);">
                         <div style="font-size: 0.875rem; color: #a5b4fc; margin-bottom: 0.5rem;">Monitor Inputs</div>
@@ -745,40 +775,7 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             config.profiles[idx].switch_mode = mode;
         }
 
-        function addRemoteHost(idx) {
-            if (!config.profiles[idx].remote_hosts) config.profiles[idx].remote_hosts = [];
-            config.profiles[idx].remote_hosts.push({address: '', profile_name: config.profiles[idx].name});
-            renderProfiles();
-        }
 
-        function updateRemoteHostAddr(pIdx, rIdx, addr) {
-            config.profiles[pIdx].remote_hosts[rIdx].address = addr;
-        }
-
-        function updateRemoteHostProfile(pIdx, rIdx, name) {
-            config.profiles[pIdx].remote_hosts[rIdx].profile_name = name;
-        }
-
-        async function testRemoteHost(addr) {
-            if (!addr) return;
-            showStatus('Testing connection to ' + addr + '...');
-            try {
-                const res = await fetch('/api/test-remote?addr=' + encodeURIComponent(addr));
-                if (res.ok) {
-                    showStatus('Connection successful to ' + addr);
-                } else {
-                    const text = await res.text();
-                    showStatus('Connect failed: ' + text, true);
-                }
-            } catch (e) {
-                showStatus('Connect failed: ' + e.message, true);
-            }
-        }
-
-        function removeRemoteHost(pIdx, rIdx) {
-            config.profiles[pIdx].remote_hosts.splice(rIdx, 1);
-            renderProfiles();
-        }
 
         async function scanNetwork() {
             const container = document.getElementById('discovery-list');

@@ -18,14 +18,17 @@ type Server struct {
 	configMgr *config.Manager
 	switcher  *switcher.Switcher
 	token     string
+	wsMgr     *WSManager
 }
 
 // NewServer creates a new API server
 func NewServer(configMgr *config.Manager, sw *switcher.Switcher) *Server {
-	return &Server{
+	s := &Server{
 		configMgr: configMgr,
 		switcher:  sw,
 	}
+	s.wsMgr = newWSManager(s)
+	return s
 }
 
 // Start starts the API server on the specified port
@@ -33,11 +36,15 @@ func (s *Server) Start(port int) error {
 	cfg := s.configMgr.Get()
 	s.token = cfg.General.APIToken
 
+	// Start WebSocket Manager
+	go s.wsMgr.start()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/switch", s.handleSwitch)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/discover", s.handleDiscover)
 	mux.HandleFunc("/api/config", s.handleConfig)
+	mux.HandleFunc("/ws", s.wsMgr.handleWebSocket)
 	mux.HandleFunc("/health", s.handleHealth)
 
 	// Use "0.0.0.0:port" and explicitly use tcp4 to avoid IPv6-only binding issues on Windows
@@ -240,4 +247,11 @@ func getProfileNames(profiles []config.Profile) []string {
 		names[i] = p.Name
 	}
 	return names
+}
+
+// BroadcastSwitch provides a public method to broadcast switch events
+func (s *Server) BroadcastSwitch(profile string, origin string) {
+	if s.wsMgr != nil {
+		s.wsMgr.BroadcastSwitch(profile, origin)
+	}
 }

@@ -342,3 +342,23 @@ func (m *Manager) SyncFromCoordinator() error {
 
 	return m.Save()
 }
+
+// UpdateProfilesFromRemote updates profiles from a generic interface (decoded from JSON)
+func (m *Manager) UpdateProfilesFromRemote(profiles interface{}) error {
+	// Re-marshal to bytes then unmarshal to []Profile to be safe with types
+	data, err := json.Marshal(profiles)
+	if err != nil {
+		return err
+	}
+
+	var newProfiles []Profile
+	if err := json.Unmarshal(data, &newProfiles); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	m.config.Profiles = newProfiles
+	m.mu.Unlock()
+
+	return m.Save()
+}

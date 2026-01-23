@@ -161,6 +161,15 @@ func runService(cfgMgr *config.Manager) {
 		}
 
 		apiServer := api.NewServer(cfgMgr, sw)
+
+		// Wire up switcher -> api broadcast for WebSocket
+		sw.SetOnSwitch(func(profileName string) {
+			// Broadcast the switch event to all connected agents
+			// Origin is "host" because this callback is triggered by a local decision/action on the host
+			// (or a successfully processed agent request)
+			apiServer.BroadcastSwitch(profileName, "host")
+		})
+
 		go func() {
 			if err := apiServer.Start(cfg.General.APIPort); err != nil {
 				log.Printf("API server error: %v", err)
@@ -207,7 +216,7 @@ func runService(cfgMgr *config.Manager) {
 			if err != nil {
 				log.Printf("Warning: failed to register settings hotkey: %v", err)
 			}
-			
+
 			// Cross-platform mapping for settings hotkey
 			if runtime.GOOS == "darwin" && strings.Contains(strings.ToUpper(cfg.General.SettingsHotkey), "CTRL") {
 				cmdVariant := strings.ReplaceAll(strings.ToUpper(cfg.General.SettingsHotkey), "CTRL", "CMD")
@@ -240,7 +249,7 @@ func runService(cfgMgr *config.Manager) {
 			if err != nil {
 				log.Printf("Warning: failed to register sleep hotkey: %v", err)
 			}
-			
+
 			// Cross-platform mapping for sleep hotkey
 			if runtime.GOOS == "darwin" && strings.Contains(strings.ToUpper(cfg.General.SleepHotkey), "CTRL") {
 				cmdVariant := strings.ReplaceAll(strings.ToUpper(cfg.General.SleepHotkey), "CTRL", "CMD")

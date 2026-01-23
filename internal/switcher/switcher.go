@@ -4,13 +4,12 @@ package switcher
 import (
 	"fmt"
 	"log"
-	"net/http"
-	"net/url"
 	"sync"
 	"time"
 
 	"vkvm/internal/config"
 	"vkvm/internal/ddc"
+	"vkvm/internal/network"
 	"vkvm/internal/osutils"
 )
 
@@ -19,6 +18,7 @@ type Switcher struct {
 	mu         sync.Mutex
 	controller ddc.Controller
 	configMgr  *config.Manager
+	wsClient   *network.WSClient
 
 	// Callbacks for UI notifications
 	onSwitch func(profileName string)
@@ -32,10 +32,38 @@ func New(configMgr *config.Manager) (*Switcher, error) {
 		return nil, fmt.Errorf("failed to create DDC controller: %w", err)
 	}
 
-	return &Switcher{
+	s := &Switcher{
 		controller: controller,
 		configMgr:  configMgr,
-	}, nil
+	}
+
+	// Initialize WebSocket client if Agent
+	cfg := configMgr.Get()
+	if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" {
+		log.Printf("Switcher: Initializing WebSocket client to Host %s", cfg.General.CoordinatorAddr)
+		s.wsClient = network.NewWSClient(cfg.General.CoordinatorAddr, cfg.General.APIToken)
+
+		// Wire up callbacks
+		s.wsClient.OnSwitch = func(profile string) {
+			log.Printf("Switcher: Received remote switch command for '%s'", profile)
+			if err := s.SwitchLocalOnly(profile); err != nil {
+				log.Printf("Switcher: Remote switch execution failed: %v", err)
+			}
+		}
+
+		s.wsClient.OnSync = func(profiles interface{}) {
+			if err := s.configMgr.UpdateProfilesFromRemote(profiles); err != nil {
+				log.Printf("Switcher: Config sync failed: %v", err)
+			} else {
+				log.Printf("Switcher: Config synced from Host")
+			}
+		}
+
+		// Start client
+		s.wsClient.Start()
+	}
+
+	return s, nil
 }
 
 // SetOnSwitch sets the callback for switch events
@@ -82,12 +110,12 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 
 	// Handle Agent Role: Forward to Host instead of local execution
 	if allowForward && cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" {
-		log.Printf("Switcher: Operating as Agent, forwarding switch request '%s' to Host %s", profileName, cfg.General.CoordinatorAddr)
-		host := config.RemoteHost{
-			Address:     cfg.General.CoordinatorAddr,
-			ProfileName: profileName,
+		if s.wsClient != nil {
+			log.Printf("Switcher: Operating as Agent, forwarding switch request '%s' to Host via WebSocket", profileName)
+			s.wsClient.SendSwitch(profileName)
+		} else {
+			log.Printf("Switcher: Error: Agent role but no WebSocket client available")
 		}
-		go s.sendRemoteSwitchRequest(host, cfg.General.APIToken, true)
 		return nil
 	}
 
@@ -100,12 +128,13 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 		switchMode = "both" // default
 	}
 
+	// Wake up the system first (simulates mouse movement)
+	// We do this unconditionally when a switch is triggered locally (or via remote command handled locally)
+	osutils.WakeUp()
+	time.Sleep(100 * time.Millisecond) // Brief delay for system to wake
+
 	// Execute local DDC switch if mode allows
 	if switchMode == "local" || switchMode == "both" {
-		// Wake up the system first (simulates mouse movement)
-		osutils.WakeUp()
-		time.Sleep(100 * time.Millisecond) // Brief delay for system to wake
-
 		// Get currently detected monitors for this machine to filter inputs
 		activeMonitors, _ := s.controller.ListMonitors()
 		activeIDs := make(map[string]bool)
@@ -138,14 +167,10 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 		log.Printf("Failed to save config: %v", err)
 	}
 
-	// Send remote switch requests (non-blocking) if mode allows
-	// Only send remote notifications if forwarding/propagation is allowed
-	if allowForward && (switchMode == "remote" || switchMode == "both") && len(profile.RemoteHosts) > 0 {
-		for _, remote := range profile.RemoteHosts {
-			// When acting as host, we tell remotes to NOT propagate further to avoid loops
-			propagate := cfg.General.Role != "host"
-			go s.sendRemoteSwitchRequest(remote, cfg.General.APIToken, propagate)
-		}
+	// Legacy RemoteHosts support is deprecated in favor of WebSocket broadcast
+	// The WSManager in the API server will handle broadcasting via the OnSwitch callback
+	if allowForward && len(profile.RemoteHosts) > 0 {
+		log.Printf("Switcher: Note: 'remote_hosts' in config is ignored in WebSocket mode. Ensure agents are connected to Host.")
 	}
 
 	if s.onSwitch != nil {
@@ -155,48 +180,14 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 	return lastErr
 }
 
-// SyncProfiles pulls最新的 profiles from the coordinator
+// SyncProfiles triggers a sync request via WebSocket if connected
 func (s *Switcher) SyncProfiles() error {
-	return s.configMgr.SyncFromCoordinator()
-}
-
-// sendRemoteSwitchRequest sends a switch request to a remote host
-// sendRemoteSwitchRequest sends a switch request to a remote host
-func (s *Switcher) sendRemoteSwitchRequest(remote config.RemoteHost, token string, propagate bool) {
-	uStr := fmt.Sprintf("http://%s/api/switch?profile=%s", remote.Address, url.QueryEscape(remote.ProfileName))
-	if !propagate {
-		uStr += "&propagate=false"
+	// With WebSocket, sync is automatic/pushed, but we can manually request it
+	if s.wsClient != nil {
+		s.wsClient.SendSyncRequest()
+		return nil
 	}
-
-	req, err := http.NewRequest("POST", uStr, nil)
-	if err != nil {
-		log.Printf("Remote switch: failed to create request to %s: %v", remote.Address, err)
-		return
-	}
-
-	// Add authorization if token is configured
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
-
-	log.Printf("Remote switch: sending request to %s (profile: %s)", remote.Address, remote.ProfileName)
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Remote switch: failed to connect to %s: %v", remote.Address, err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Remote switch: %s returned status %d", remote.Address, resp.StatusCode)
-		return
-	}
-
-	log.Printf("Remote switch: successfully notified %s", remote.Address)
+	return nil
 }
 
 // GetCurrentProfile returns the current profile name
@@ -212,4 +203,12 @@ func (s *Switcher) ListMonitors() ([]ddc.Monitor, error) {
 // TestMonitor tests switching a specific monitor to verify DDC works
 func (s *Switcher) TestMonitor(monitorID string, input ddc.InputSource) error {
 	return s.controller.SetInputSource(monitorID, input)
+}
+
+// IsConnectedToCheck returns true if the agent is connected to the host
+func (s *Switcher) IsConnectedToCheck() bool {
+	if s.wsClient == nil {
+		return false
+	}
+	return s.wsClient.IsConnected()
 }
