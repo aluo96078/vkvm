@@ -120,7 +120,7 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 	}
 
 	var lastErr error
-	count := 0
+	// count := 0
 
 	// Determine switch mode
 	switchMode := profile.SwitchMode
@@ -142,6 +142,9 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 			activeIDs[m.ID] = true
 		}
 
+		var wg sync.WaitGroup
+		var errMu sync.Mutex
+
 		for monitorID, inputSource := range profile.MonitorInputs {
 			// Skip monitors not found on this machine (avoids errors from synced foreign configs)
 			if !activeIDs[monitorID] {
@@ -149,16 +152,18 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 				continue
 			}
 
-			if count > 0 {
-				// Small delay between monitors to avoid DDC bus contention
-				time.Sleep(500 * time.Millisecond)
-			}
-			if err := s.controller.SetInputSource(monitorID, ddc.InputSource(inputSource)); err != nil {
-				log.Printf("Failed to switch monitor %s: %v", monitorID, err)
-				lastErr = err
-			}
-			count++
+			wg.Add(1)
+			go func(mid string, src int) {
+				defer wg.Done()
+				if err := s.controller.SetInputSource(mid, ddc.InputSource(src)); err != nil {
+					log.Printf("Failed to switch monitor %s: %v", mid, err)
+					errMu.Lock()
+					lastErr = err
+					errMu.Unlock()
+				}
+			}(monitorID, inputSource)
 		}
+		wg.Wait()
 	}
 
 	// Save config
