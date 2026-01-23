@@ -47,7 +47,6 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/discover", s.handleUIDiscover)
 	mux.HandleFunc("/api/test-remote", s.handleTestRemote)
 	mux.HandleFunc("/api/sync-to", s.handleSyncTo)
-	mux.HandleFunc("/api/sync-to", s.handleSyncTo)
 	mux.HandleFunc("/api/sleep-display", s.handleSleepDisplay)
 	mux.HandleFunc("/api/connection-status", s.handleConnectionStatus)
 
