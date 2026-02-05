@@ -225,6 +225,11 @@ func (t *Trap) Start() error {
 		return fmt.Errorf("failed to register kill switch: %w", err)
 	}
 
+	// Install low-level hooks for input blocking
+	if err := t.installHooks(); err != nil {
+		return fmt.Errorf("failed to install hooks: %w", err)
+	}
+
 	t.running = true
 
 	// Start message loop thread
@@ -440,6 +445,35 @@ func (t *Trap) registerKillSwitch() error {
 	}
 
 	return fmt.Errorf("RegisterHotKey failed: %v", err)
+}
+
+// installHooks installs low-level mouse and keyboard hooks for input blocking
+func (t *Trap) installHooks() error {
+	// Install mouse hook
+	mouseHook, _, err := SetWindowsHookEx.Call(
+		WH_MOUSE_LL,
+		syscall.NewCallback(t.mouseHookProc),
+		0, // hMod (NULL for low-level hooks)
+		0, // dwThreadId (0 for global hooks)
+	)
+	if mouseHook == 0 {
+		return fmt.Errorf("failed to install mouse hook: %v", err)
+	}
+	t.mouseHook = syscall.Handle(mouseHook)
+
+	// Install keyboard hook
+	keyHook, _, err := SetWindowsHookEx.Call(
+		WH_KEYBOARD_LL,
+		syscall.NewCallback(t.keyboardHookProc),
+		0, // hMod (NULL for low-level hooks)
+		0, // dwThreadId (0 for global hooks)
+	)
+	if keyHook == 0 {
+		return fmt.Errorf("failed to install keyboard hook: %v", err)
+	}
+	t.keyHook = syscall.Handle(keyHook)
+
+	return nil
 }
 
 // setupCursorClipping sets up cursor clipping for infinite scrolling

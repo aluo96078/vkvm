@@ -231,8 +231,13 @@ func runService(cfgMgr *config.Manager) {
 					}
 
 					injectionMutex.Lock()
+					oldAllow := allowInjection
 					allowInjection = (detectedProfile == cfg.General.AgentProfile)
 					injectionMutex.Unlock()
+
+					if oldAllow != allowInjection {
+						log.Printf("Agent: Periodic check - detected profile '%s', agent profile '%s', allow injection: %v", detectedProfile, cfg.General.AgentProfile, allowInjection)
+					}
 				}
 			}()
 		} else {
@@ -252,6 +257,7 @@ func runService(cfgMgr *config.Manager) {
 
 			if !shouldInject {
 				// Silently ignore input when not displaying this agent
+				log.Printf("Agent: Injection blocked - not active profile")
 				return
 			}
 
@@ -268,25 +274,26 @@ func runService(cfgMgr *config.Manager) {
 
 		// Set up switch event handler to control injection based on active profile
 		wsClient.OnSwitch = func(profile string) {
-			// When a switch event is received, immediately check the current active profile via DDC
-			detectedProfile, err := sw.DetectActiveProfile()
-			if err != nil {
-				log.Printf("Failed to detect active profile: %v", err)
-				return
-			}
-
 			injectionMutex.Lock()
 			defer injectionMutex.Unlock()
 			if cfg.General.AgentProfile != "" {
-				allowInjection = (detectedProfile == cfg.General.AgentProfile)
+				allowInjection = (profile == cfg.General.AgentProfile)
+				log.Printf("Agent: Switch event received for profile '%s', agent profile '%s', allow injection: %v", profile, cfg.General.AgentProfile, allowInjection)
 			} else {
 				// If no specific agent profile configured, always allow injection
 				allowInjection = true
+				log.Printf("Agent: No agent profile configured, allowing injection")
 			}
 		}
 
 		wsClient.Start()
 	} else if cfg.General.Role == "host" {
+		// Check administrator privileges on Windows
+		if runtime.GOOS == "windows" {
+			log.Println("Note: Input capture requires administrator privileges")
+			log.Println("Please ensure you're running this application as Administrator")
+		}
+
 		// Start input capture on host
 		inputTrap = input.NewTrap()
 
