@@ -104,6 +104,7 @@ var (
 	UnhookWindowsHookEx        = user32.NewProc("UnhookWindowsHookEx")
 	CallNextHookEx             = user32.NewProc("CallNextHookEx")
 	GetKeyState                = user32.NewProc("GetKeyState")
+	GetSystemMetrics           = user32.NewProc("GetSystemMetrics")
 	GetClientRect              = user32.NewProc("GetClientRect")
 	PostQuitMessage            = user32.NewProc("PostQuitMessage")
 	SystemParametersInfo       = user32.NewProc("SystemParametersInfoW")
@@ -295,6 +296,16 @@ func (t *Trap) EnableCapture(enabled bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.captureEnabled = enabled
+
+	if enabled {
+		// Move cursor to center of screen when enabling capture
+		screenWidth, _, _ := GetSystemMetrics.Call(0)  // SM_CXSCREEN
+		screenHeight, _, _ := GetSystemMetrics.Call(1) // SM_CYSCREEN
+		centerX := screenWidth / 2
+		centerY := screenHeight / 2
+		SetCursorPos.Call(centerX, centerY)
+	}
+
 	log.Printf("Input capture %s", map[bool]string{true: "enabled", false: "disabled"}[enabled])
 }
 
@@ -737,21 +748,43 @@ func (t *Trap) mouseHookProc(nCode int32, wParam uintptr, lParam uintptr) uintpt
 			Timestamp: time.Now().UnixMilli(),
 		}
 
+		// Check if we're in capture mode
+		t.mu.Lock()
+		captureEnabled := t.captureEnabled
+		t.mu.Unlock()
+
 		switch msg {
 		case WM_MOUSEMOVE:
 			event.Type = "mouse_move"
-			// Calculate relative movement from last position
-			if t.lastMouseX != -1 && t.lastMouseY != -1 {
-				event.DeltaX = int(hookStruct.Pt.X - t.lastMouseX)
-				event.DeltaY = int(hookStruct.Pt.Y - t.lastMouseY)
+
+			if captureEnabled {
+				// In capture mode, calculate delta from center of screen
+				// and reset cursor to center to allow unlimited movement
+				screenWidth, _, _ := GetSystemMetrics.Call(0)  // SM_CXSCREEN
+				screenHeight, _, _ := GetSystemMetrics.Call(1) // SM_CYSCREEN
+				centerX := int32(screenWidth / 2)
+				centerY := int32(screenHeight / 2)
+
+				// Calculate delta from center
+				event.DeltaX = int(hookStruct.Pt.X - centerX)
+				event.DeltaY = int(hookStruct.Pt.Y - centerY)
+
+				// Reset cursor to center (will be blocked by returning 1)
+				if event.DeltaX != 0 || event.DeltaY != 0 {
+					SetCursorPos.Call(uintptr(centerX), uintptr(centerY))
+				}
 			} else {
-				// First mouse move, just initialize position without sending event
-				event.DeltaX = 0
-				event.DeltaY = 0
+				// Normal mode: calculate relative movement from last position
+				if t.lastMouseX != -1 && t.lastMouseY != -1 {
+					event.DeltaX = int(hookStruct.Pt.X - t.lastMouseX)
+					event.DeltaY = int(hookStruct.Pt.Y - t.lastMouseY)
+				} else {
+					event.DeltaX = 0
+					event.DeltaY = 0
+				}
+				t.lastMouseX = hookStruct.Pt.X
+				t.lastMouseY = hookStruct.Pt.Y
 			}
-			// Update last position
-			t.lastMouseX = hookStruct.Pt.X
-			t.lastMouseY = hookStruct.Pt.Y
 		case WM_LBUTTONDOWN:
 			event.Type = "mouse_btn"
 			event.Button = 1
@@ -785,10 +818,6 @@ func (t *Trap) mouseHookProc(nCode int32, wParam uintptr, lParam uintptr) uintpt
 		}
 
 		// If capture mode is enabled, block input from reaching system
-		t.mu.Lock()
-		captureEnabled := t.captureEnabled
-		t.mu.Unlock()
-
 		if captureEnabled {
 			// Return 1 to block input
 			return 1

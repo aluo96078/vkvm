@@ -29,17 +29,22 @@ CGPoint getCurrentMousePosition() {
 }
 
 // Helper functions - inject mouse move with relative delta
-void injectMouseMove(CGFloat dx, CGFloat dy) {
+void injectMouseMoveRelative(CGFloat dx, CGFloat dy) {
     // Get current mouse position
     CGPoint currentPos = getCurrentMousePosition();
 
     // Calculate new position
     CGPoint newPos = CGPointMake(currentPos.x + dx, currentPos.y + dy);
 
-    // Create mouse moved event at the new position
+    // Create a mouse moved event
     CGEventRef event = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, newPos, kCGMouseButtonLeft);
-    CGEventPost(kCGSessionEventTap, event);
-    CFRelease(event);
+    if (event) {
+        // Set relative delta values for proper mouse acceleration handling
+        CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, (int64_t)dx);
+        CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, (int64_t)dy);
+        CGEventPost(kCGSessionEventTap, event);
+        CFRelease(event);
+    }
 }
 
 void injectMouseButton(int button, bool pressed) {
@@ -255,7 +260,13 @@ func NewInjector() *Injector {
 
 // InjectMouseMove injects a mouse movement event
 func (i *Injector) InjectMouseMove(dx, dy int) error {
-	C.injectMouseMove(C.CGFloat(dx), C.CGFloat(dy))
+	// Skip zero movement
+	if dx == 0 && dy == 0 {
+		return nil
+	}
+
+	// Use C function for proper relative mouse movement
+	C.injectMouseMoveRelative(C.CGFloat(dx), C.CGFloat(dy))
 	return nil
 }
 
