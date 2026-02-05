@@ -217,3 +217,59 @@ func (s *Switcher) IsConnectedToCheck() bool {
 	}
 	return s.wsClient.IsConnected()
 }
+
+// GetCurrentInputs returns the current input source for all detected monitors
+func (s *Switcher) GetCurrentInputs() (map[string]ddc.InputSource, error) {
+	monitors, err := s.controller.ListMonitors()
+	if err != nil {
+		return nil, err
+	}
+
+	inputs := make(map[string]ddc.InputSource)
+	for _, monitor := range monitors {
+		input, err := s.controller.GetCurrentInput(monitor.ID)
+		if err != nil {
+			log.Printf("Failed to get current input for monitor %s: %v", monitor.ID, err)
+			continue
+		}
+		inputs[monitor.ID] = input
+	}
+
+	return inputs, nil
+}
+
+// DetectActiveProfile attempts to detect which profile is currently active by comparing
+// current monitor inputs with profile configurations
+func (s *Switcher) DetectActiveProfile() (string, error) {
+	currentInputs, err := s.GetCurrentInputs()
+	if err != nil {
+		return "", err
+	}
+
+	cfg := s.configMgr.Get()
+
+	// Try to match current inputs with profiles
+	for _, profile := range cfg.Profiles {
+		matches := true
+
+		// Check if all profile's monitor inputs match current state
+		for monitorID, expectedInput := range profile.MonitorInputs {
+			// Skip monitors not currently detected
+			currentInput, exists := currentInputs[monitorID]
+			if !exists {
+				continue
+			}
+
+			if int(currentInput) != expectedInput {
+				matches = false
+				break
+			}
+		}
+
+		if matches && len(profile.MonitorInputs) > 0 {
+			return profile.Name, nil
+		}
+	}
+
+	return "", nil // No matching profile found
+}

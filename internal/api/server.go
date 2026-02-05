@@ -49,6 +49,7 @@ func (s *Server) Start(port int) error {
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/discover", s.handleDiscover)
 	mux.HandleFunc("/api/config", s.handleConfig)
+	mux.HandleFunc("/api/detect", s.handleDetect)
 	mux.HandleFunc("/ws", s.wsMgr.handleWebSocket)
 	mux.HandleFunc("/health", s.handleHealth)
 
@@ -213,6 +214,51 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"current_profile": currentProfile,
 		"profiles":        getProfileNames(cfg.Profiles),
+	})
+}
+
+// handleDetect handles GET /api/detect - detects current active profile by reading monitor inputs
+func (s *Server) handleDetect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get current inputs for all monitors
+	currentInputs, err := s.switcher.GetCurrentInputs()
+	if err != nil {
+		log.Printf("API: Failed to get current inputs: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Try to detect which profile is currently active
+	detectedProfile, err := s.switcher.DetectActiveProfile()
+	if err != nil {
+		log.Printf("API: Failed to detect profile: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Build response with monitor details
+	monitors, _ := s.switcher.ListMonitors()
+	monitorDetails := make([]map[string]interface{}, 0)
+	for _, monitor := range monitors {
+		if input, exists := currentInputs[monitor.ID]; exists {
+			monitorDetails = append(monitorDetails, map[string]interface{}{
+				"id":            monitor.ID,
+				"name":          monitor.Name,
+				"current_input": input.String(),
+				"input_code":    int(input),
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"detected_profile": detectedProfile,
+		"monitors":         monitorDetails,
+		"saved_profile":    s.switcher.GetCurrentProfile(),
 	})
 }
 

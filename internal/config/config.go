@@ -103,6 +103,15 @@ type GeneralConfig struct {
 
 	// SleepHotkey is the global hotkey to put displays to sleep (e.g. "Ctrl+Alt+P")
 	SleepHotkey string `json:"sleep_hotkey,omitempty"`
+
+	// AgentProfile is the profile name for this agent (used to auto-detect when to inject input)
+	AgentProfile string `json:"agent_profile,omitempty"`
+
+	// InputCaptureEnabled enables complete input capture mode on Host (prevents local system from receiving input)
+	InputCaptureEnabled bool `json:"input_capture_enabled,omitempty"`
+
+	// EscapeHotkey is the emergency hotkey to disable input capture (e.g. "Ctrl+Alt+Shift+Esc")
+	EscapeHotkey string `json:"escape_hotkey,omitempty"`
 }
 
 // DefaultConfig returns a new Config with sensible defaults
@@ -122,14 +131,16 @@ func DefaultConfig() *Config {
 		},
 		Monitors: []MonitorInfo{},
 		General: GeneralConfig{
-			StartOnBoot:       false,
-			StartMinimized:    true,
-			ShowNotifications: true,
-			CurrentProfile:    "PC1",
-			APIEnabled:        true, // Ensure API is on by default for remote usage
-			APIPort:           18080,
-			Role:              "host",
-			SettingsHotkey:    "Ctrl+Alt+S",
+			StartOnBoot:         false,
+			StartMinimized:      true,
+			ShowNotifications:   true,
+			CurrentProfile:      "PC1",
+			APIEnabled:          true, // Ensure API is on by default for remote usage
+			APIPort:             18080,
+			Role:                "host",
+			SettingsHotkey:      "Ctrl+Alt+S",
+			InputCaptureEnabled: false,
+			EscapeHotkey:        "Ctrl+Alt+Shift+Esc",
 		},
 	}
 }

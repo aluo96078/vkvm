@@ -15,89 +15,90 @@ import (
 
 // Trap represents a Windows input trap
 type Trap struct {
-	hwnd       syscall.Handle
-	events     chan InputEvent
-	running    bool
-	mu         sync.Mutex
-	killSwitch func()
-	cursorX    int
-	cursorY    int
-	mouseHook  syscall.Handle
-	keyHook    syscall.Handle
-	lastMouseX int32
-	lastMouseY int32
+	hwnd           syscall.Handle
+	events         chan InputEvent
+	running        bool
+	mu             sync.Mutex
+	killSwitch     func()
+	cursorX        int
+	cursorY        int
+	mouseHook      syscall.Handle
+	keyHook        syscall.Handle
+	lastMouseX     int32
+	lastMouseY     int32
+	captureEnabled bool // When true, blocks input from reaching system
 }
 
 // Windows API constants and types
 const (
-	WM_INPUT          = 0x00FF
+	WM_INPUT               = 0x00FF
 	WM_INPUT_DEVICE_CHANGE = 0x00FE
-	WM_HOTKEY         = 0x0312
-	RIM_TYPEMOUSE     = 0
-	RIM_TYPEKEYBOARD  = 1
-	RID_INPUT         = 0x10000003
-	RIDEV_INPUTSINK   = 0x00000100
-	RIDEV_NOLEGACY    = 0x00000030
-	RIDEV_CAPTUREMOUSE = 0x00000200
-	MOD_CONTROL       = 0x0002
-	MOD_ALT           = 0x0001
-	VK_ESCAPE         = 0x1B
-	IDI_APPLICATION   = 32512
-	IDC_ARROW         = 32512
-	WS_EX_TRANSPARENT = 0x00000020
-	WS_EX_LAYERED     = 0x00080000
-	WS_EX_TOPMOST     = 0x00000008
-	LWA_ALPHA         = 0x00000002
-	WS_VISIBLE        = 0x10000000
-	WS_POPUP          = 0x80000000
-	WH_MOUSE_LL       = 14
-	WH_KEYBOARD_LL    = 13
-	WM_MOUSEMOVE      = 0x0200
-	WM_LBUTTONDOWN    = 0x0201
-	WM_LBUTTONUP      = 0x0202
-	WM_RBUTTONDOWN    = 0x0204
-	WM_RBUTTONUP      = 0x0205
-	WM_MBUTTONDOWN    = 0x0207
-	WM_MBUTTONUP      = 0x0208
-	CW_USEDEFAULT     = 0x80000000
-	SPI_GETWORKAREA   = 0x0030
+	WM_HOTKEY              = 0x0312
+	RIM_TYPEMOUSE          = 0
+	RIM_TYPEKEYBOARD       = 1
+	RID_INPUT              = 0x10000003
+	RIDEV_INPUTSINK        = 0x00000100
+	RIDEV_NOLEGACY         = 0x00000030
+	RIDEV_CAPTUREMOUSE     = 0x00000200
+	MOD_CONTROL            = 0x0002
+	MOD_ALT                = 0x0001
+	VK_ESCAPE              = 0x1B
+	IDI_APPLICATION        = 32512
+	IDC_ARROW              = 32512
+	WS_EX_TRANSPARENT      = 0x00000020
+	WS_EX_LAYERED          = 0x00080000
+	WS_EX_TOPMOST          = 0x00000008
+	LWA_ALPHA              = 0x00000002
+	WS_VISIBLE             = 0x10000000
+	WS_POPUP               = 0x80000000
+	WH_MOUSE_LL            = 14
+	WH_KEYBOARD_LL         = 13
+	WM_MOUSEMOVE           = 0x0200
+	WM_LBUTTONDOWN         = 0x0201
+	WM_LBUTTONUP           = 0x0202
+	WM_RBUTTONDOWN         = 0x0204
+	WM_RBUTTONUP           = 0x0205
+	WM_MBUTTONDOWN         = 0x0207
+	WM_MBUTTONUP           = 0x0208
+	CW_USEDEFAULT          = 0x80000000
+	SPI_GETWORKAREA        = 0x0030
 )
 
 // Windows API functions
 var (
-	user32                  = syscall.NewLazyDLL("user32.dll")
-	kernel32                = syscall.NewLazyDLL("kernel32.dll")
-	RegisterRawInputDevices = user32.NewProc("RegisterRawInputDevices")
-	GetRawInputData         = user32.NewProc("GetRawInputData")
-	CreateWindowEx          = user32.NewProc("CreateWindowExW")
-	DefWindowProc           = user32.NewProc("DefWindowProcW")
-	RegisterClassEx         = user32.NewProc("RegisterClassExW")
-	GetMessage              = user32.NewProc("GetMessageW")
-	PeekMessage             = user32.NewProc("PeekMessageW")
-	MsgWaitForMultipleObjects = user32.NewProc("MsgWaitForMultipleObjects")
-	TranslateMessage        = user32.NewProc("TranslateMessage")
-	DispatchMessage         = user32.NewProc("DispatchMessageW")
-	RegisterHotKey          = user32.NewProc("RegisterHotKey")
-	UnregisterHotKey        = user32.NewProc("UnregisterHotKey")
-	ClipCursor              = user32.NewProc("ClipCursor")
-	GetCursorPos            = user32.NewProc("GetCursorPos")
-	SetCursorPos            = user32.NewProc("SetCursorPos")
-	SetCursor               = user32.NewProc("SetCursor")
-	LoadCursor              = user32.NewProc("LoadCursorW")
-	LoadIcon                = user32.NewProc("LoadIconW")
-	GetWindowRect           = user32.NewProc("GetWindowRect")
-	ShowWindow              = user32.NewProc("ShowWindow")
-	UpdateWindow            = user32.NewProc("UpdateWindow")
-	SetWindowPos            = user32.NewProc("SetWindowPos")
+	user32                     = syscall.NewLazyDLL("user32.dll")
+	kernel32                   = syscall.NewLazyDLL("kernel32.dll")
+	RegisterRawInputDevices    = user32.NewProc("RegisterRawInputDevices")
+	GetRawInputData            = user32.NewProc("GetRawInputData")
+	CreateWindowEx             = user32.NewProc("CreateWindowExW")
+	DefWindowProc              = user32.NewProc("DefWindowProcW")
+	RegisterClassEx            = user32.NewProc("RegisterClassExW")
+	GetMessage                 = user32.NewProc("GetMessageW")
+	PeekMessage                = user32.NewProc("PeekMessageW")
+	MsgWaitForMultipleObjects  = user32.NewProc("MsgWaitForMultipleObjects")
+	TranslateMessage           = user32.NewProc("TranslateMessage")
+	DispatchMessage            = user32.NewProc("DispatchMessageW")
+	RegisterHotKey             = user32.NewProc("RegisterHotKey")
+	UnregisterHotKey           = user32.NewProc("UnregisterHotKey")
+	ClipCursor                 = user32.NewProc("ClipCursor")
+	GetCursorPos               = user32.NewProc("GetCursorPos")
+	SetCursorPos               = user32.NewProc("SetCursorPos")
+	SetCursor                  = user32.NewProc("SetCursor")
+	LoadCursor                 = user32.NewProc("LoadCursorW")
+	LoadIcon                   = user32.NewProc("LoadIconW")
+	GetWindowRect              = user32.NewProc("GetWindowRect")
+	ShowWindow                 = user32.NewProc("ShowWindow")
+	UpdateWindow               = user32.NewProc("UpdateWindow")
+	SetWindowPos               = user32.NewProc("SetWindowPos")
 	SetLayeredWindowAttributes = user32.NewProc("SetLayeredWindowAttributes")
-	SetForegroundWindow       = user32.NewProc("SetForegroundWindow")
-	SetWindowsHookEx          = user32.NewProc("SetWindowsHookExW")
-	UnhookWindowsHookEx       = user32.NewProc("UnhookWindowsHookEx")
-	CallNextHookEx            = user32.NewProc("CallNextHookEx")
-	GetClientRect           = user32.NewProc("GetClientRect")
-	PostQuitMessage         = user32.NewProc("PostQuitMessage")
-	SystemParametersInfo    = user32.NewProc("SystemParametersInfoW")
-	GetModuleHandle         = kernel32.NewProc("GetModuleHandleW")
+	SetForegroundWindow        = user32.NewProc("SetForegroundWindow")
+	SetWindowsHookEx           = user32.NewProc("SetWindowsHookExW")
+	UnhookWindowsHookEx        = user32.NewProc("UnhookWindowsHookEx")
+	CallNextHookEx             = user32.NewProc("CallNextHookEx")
+	GetClientRect              = user32.NewProc("GetClientRect")
+	PostQuitMessage            = user32.NewProc("PostQuitMessage")
+	SystemParametersInfo       = user32.NewProc("SystemParametersInfoW")
+	GetModuleHandle            = kernel32.NewProc("GetModuleHandleW")
 )
 
 // Windows API structures
@@ -149,9 +150,9 @@ type RAWINPUTHEADER struct {
 
 type RAWMOUSE struct {
 	UsFlags            uint16
-	_                  uint16  // padding for alignment
-	UsButtonFlags      uint16  // union: can also be accessed as ulButtons (uint32)
-	UsButtonData       uint16  // union: part of ulButtons
+	_                  uint16 // padding for alignment
+	UsButtonFlags      uint16 // union: can also be accessed as ulButtons (uint32)
+	UsButtonData       uint16 // union: part of ulButtons
 	UlRawButtons       uint32
 	LLastX             int32
 	LLastY             int32
@@ -184,8 +185,8 @@ type KBDLLHOOKSTRUCT struct {
 }
 
 type RAWINPUT struct {
-	Header  RAWINPUTHEADER
-	Mouse   RAWMOUSE
+	Header RAWINPUTHEADER
+	Mouse  RAWMOUSE
 	// Note: Union in C, but we access via pointer
 }
 
@@ -279,6 +280,27 @@ func (t *Trap) SetKillSwitch(callback func()) error {
 	return nil
 }
 
+// EnableCapture enables or disables input capture mode
+// When enabled, input is blocked from reaching the system
+func (t *Trap) EnableCapture(enabled bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.captureEnabled = enabled
+	if enabled {
+		log.Printf("[TRAP] Input capture mode ENABLED - system will not receive input")
+	} else {
+		log.Printf("[TRAP] Input capture mode DISABLED - system will receive input normally")
+	}
+}
+
+// IsCaptureEnabled returns whether capture mode is currently enabled
+func (t *Trap) IsCaptureEnabled() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.captureEnabled
+}
+
 // createWindow creates a transparent overlay window
 func (t *Trap) createWindow() error {
 	log.Printf("[DEBUG] Starting window creation process")
@@ -317,9 +339,9 @@ func (t *Trap) createWindow() error {
 	// Create a layered window for receiving raw input messages
 	log.Printf("[DEBUG] Creating layered window for raw input")
 	hwnd, _, err := CreateWindowEx.Call(
-		WS_EX_LAYERED | WS_EX_TRANSPARENT, // layered and transparent
+		WS_EX_LAYERED|WS_EX_TRANSPARENT, // layered and transparent
 		uintptr(unsafe.Pointer(className)),
-		0, // no title
+		0,          // no title
 		WS_VISIBLE, // visible window
 		0, 0, 1, 1, // 1x1 pixel window
 		0, 0, 0, 0,
@@ -830,6 +852,16 @@ func (t *Trap) mouseHookProc(nCode int32, wParam uintptr, lParam uintptr) uintpt
 		default:
 			// Channel full, drop event
 		}
+
+		// If capture mode is enabled, block input from reaching system
+		t.mu.Lock()
+		captureEnabled := t.captureEnabled
+		t.mu.Unlock()
+
+		if captureEnabled {
+			// Return 1 to block input
+			return 1
+		}
 	}
 
 	ret, _, _ := CallNextHookEx.Call(0, uintptr(nCode), wParam, lParam)
@@ -860,6 +892,18 @@ func (t *Trap) keyboardHookProc(nCode int32, wParam uintptr, lParam uintptr) uin
 		case t.events <- event:
 		default:
 			// Channel full, drop event
+		}
+
+		// If capture mode is enabled, block input from reaching system
+		// Exception: Let hotkeys registered with RegisterHotKey still work
+		t.mu.Lock()
+		captureEnabled := t.captureEnabled
+		t.mu.Unlock()
+
+		if captureEnabled {
+			// Return 1 to block input
+			// Note: RegisterHotKey hotkeys work at a lower level and will still function
+			return 1
 		}
 	}
 

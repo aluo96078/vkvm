@@ -197,54 +197,91 @@ func runService(cfgMgr *config.Manager) {
 	}
 
 	// Debug: Log configuration
-	log.Printf("[DEBUG] Configuration: Role=%s, APIEnabled=%t", cfg.General.Role, cfg.General.APIEnabled)
-
 	// Input handling based on role
 	if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" {
 		log.Printf("[AGENT] Starting agent mode to receive input from host")
 
 		// Create input injector
 		injector := input.NewInjector()
-		log.Printf("[AGENT] Input injector created")
+
+		// Agent input injection control
+		var (
+			allowInjection bool
+			injectionMutex sync.Mutex
+		)
+
+		// Periodic detection of current display state
+		if cfg.General.AgentProfile != "" {
+			log.Printf("[AGENT] Auto-detect enabled: will only inject when profile is '%s'", cfg.General.AgentProfile)
+
+			// Start detection goroutine
+			go func() {
+				ticker := time.NewTicker(1 * time.Second) // Check every second
+				defer ticker.Stop()
+
+				for range ticker.C {
+					detectedProfile, err := sw.DetectActiveProfile()
+					if err != nil {
+						log.Printf("[AGENT] Detection error: %v", err)
+						continue
+					}
+
+					injectionMutex.Lock()
+					previousState := allowInjection
+					allowInjection = (detectedProfile == cfg.General.AgentProfile)
+					injectionMutex.Unlock()
+
+					// Log state changes
+					if previousState != allowInjection {
+						if allowInjection {
+							log.Printf("[AGENT] Display switched to '%s' - ENABLING input injection", detectedProfile)
+						} else {
+							log.Printf("[AGENT] Display switched to '%s' - DISABLING input injection", detectedProfile)
+						}
+					}
+				}
+			}()
+		} else {
+			// Auto-detect disabled, always allow injection
+			log.Printf("[AGENT] Auto-detect disabled: injection always enabled")
+			allowInjection = true
+		}
 
 		// Set up WebSocket client for agent
 		wsClient = network.NewWSClient(cfg.General.CoordinatorAddr, cfg.General.APIToken)
 
 		// Set up event handler for received input events
-		receivedCount := 0
 		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
-			receivedCount++
-			log.Printf("[AGENT-RECEIVE] Event #%d: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X, modifiers:0x%X, ts:%d)",
-				receivedCount, eventType, deltaX, deltaY, button, pressed, keyCode, modifiers, timestamp)
+			// Check if injection is allowed
+			injectionMutex.Lock()
+			shouldInject := allowInjection
+			injectionMutex.Unlock()
 
-			// Inject input on macOS agent
+			if !shouldInject {
+				// Silently ignore input when not displaying this agent
+				return
+			}
+
+			// Inject input on Agent
 			var err error
 			switch eventType {
 			case "mouse_move":
 				err = injector.InjectMouseMove(deltaX, deltaY)
 				if err != nil {
-					log.Printf("[AGENT-INJECT] Failed to inject mouse move: %v", err)
-				} else {
-					log.Printf("[AGENT-INJECT] Event #%d: Mouse move injected successfully", receivedCount)
+					log.Printf("[AGENT] Failed to inject mouse move: %v", err)
 				}
 			case "mouse_btn":
 				err = injector.InjectMouseButton(button, pressed)
 				if err != nil {
-					log.Printf("[AGENT-INJECT] Failed to inject mouse button: %v", err)
-				} else {
-					log.Printf("[AGENT-INJECT] Event #%d: Mouse button %d %s injected successfully", 
-						receivedCount, button, map[bool]string{true: "pressed", false: "released"}[pressed])
+					log.Printf("[AGENT] Failed to inject mouse button: %v", err)
 				}
 			case "key":
 				err = injector.InjectKey(keyCode, pressed, modifiers)
 				if err != nil {
-					log.Printf("[AGENT-INJECT] Failed to inject key: %v", err)
-				} else {
-					log.Printf("[AGENT-INJECT] Event #%d: Key 0x%X %s injected successfully", 
-						receivedCount, keyCode, map[bool]string{true: "pressed", false: "released"}[pressed])
+					log.Printf("[AGENT] Failed to inject key: %v", err)
 				}
 			default:
-				log.Printf("[AGENT-INJECT] Unknown event type: %s", eventType)
+				log.Printf("[AGENT] Unknown event type: %s", eventType)
 			}
 		}
 
@@ -253,8 +290,21 @@ func runService(cfgMgr *config.Manager) {
 	} else if cfg.General.Role == "host" {
 		log.Printf("[HOST] Starting host mode - will capture input and send to agents")
 
+		// Check if input capture mode is enabled
+		if cfg.General.InputCaptureEnabled {
+			log.Printf("[HOST] ⚠️  INPUT CAPTURE MODE ENABLED ⚠️")
+			log.Printf("[HOST] Local keyboard/mouse will be BLOCKED when active")
+			log.Printf("[HOST] Emergency escape hotkey: %s", cfg.General.EscapeHotkey)
+		}
+
 		// Start input capture on host
 		inputTrap := input.NewTrap()
+
+		// Enable capture mode if configured
+		if cfg.General.InputCaptureEnabled {
+			inputTrap.EnableCapture(true)
+		}
+
 		if err := inputTrap.Start(); err != nil {
 			log.Printf("[HOST] Failed to start input capture: %v", err)
 		} else {
@@ -263,9 +313,10 @@ func runService(cfgMgr *config.Manager) {
 			// Process captured events and broadcast to all connected agents
 			go func() {
 				eventCount := 0
+				apiUnavailableLogged := false
 				for event := range inputTrap.Events() {
 					eventCount++
-					if eventCount%100 == 0 { // Log progress every 100 events
+					if eventCount%1000 == 0 { // Log progress every 1000 events
 						log.Printf("[HOST] Sent %d events to agents", eventCount)
 					}
 
@@ -278,8 +329,9 @@ func runService(cfgMgr *config.Manager) {
 							event.KeyCode, event.Modifiers,
 							event.Timestamp,
 						)
-					} else {
-						log.Printf("[HOST] API server not available, cannot broadcast event")
+					} else if !apiUnavailableLogged {
+						log.Printf("[HOST] API server not available, cannot broadcast events")
+						apiUnavailableLogged = true
 					}
 				}
 			}()
@@ -306,6 +358,25 @@ func runService(cfgMgr *config.Manager) {
 	refreshShortcuts := func() {
 		cfg := cfgMgr.Get()
 		hkMgr.Clear() // Clear existing registered callbacks
+
+		// Register emergency escape hotkey for Host with input capture
+		if cfg.General.Role == "host" && cfg.General.InputCaptureEnabled && cfg.General.EscapeHotkey != "" {
+			_, err := hkMgr.Register(cfg.General.EscapeHotkey, func() {
+				log.Printf("EMERGENCY: Escape hotkey pressed - disabling input capture")
+				cfg := cfgMgr.Get()
+				cfg.General.InputCaptureEnabled = false
+				cfgMgr.Set(cfg)
+				if err := cfgMgr.Save(); err != nil {
+					log.Printf("Failed to save config: %v", err)
+				}
+				log.Printf("Input capture disabled. Please restart the application for changes to take effect.")
+			})
+			if err != nil {
+				log.Printf("Warning: failed to register escape hotkey: %v", err)
+			} else {
+				log.Printf("Registered emergency escape hotkey: %s", cfg.General.EscapeHotkey)
+			}
+		}
 
 		// Register global settings hotkey
 		if cfg.General.SettingsHotkey != "" {

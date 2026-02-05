@@ -35,3 +35,13 @@ func (t *Trap) Events() <-chan InputEvent {
 func (t *Trap) SetKillSwitch(callback func()) error {
 	return fmt.Errorf("kill switch not supported on this platform")
 }
+
+// EnableCapture enables or disables input capture mode (stub)
+func (t *Trap) EnableCapture(enabled bool) {
+	// Stub: no-op
+}
+
+// IsCaptureEnabled returns whether capture mode is currently enabled (stub)
+func (t *Trap) IsCaptureEnabled() bool {
+	return false
+}

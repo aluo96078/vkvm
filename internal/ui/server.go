@@ -505,8 +505,36 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                     </div>
                 </div>
             </div>
+
+            <!-- Agent-specific settings -->
+            <div id="agent-settings" style="display: none; margin-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 0.75rem;">
+                <div class="input-group">
+                    <label>Agent Profile (Auto-detect Display):</label>
+                    <input type="text" id="agent-profile" onchange="updateGeneralConfig()" placeholder="e.g. Mac (leave empty to disable auto-detect)">
+                    <small style="color: #94a3b8; font-size: 0.875rem; margin-top: 0.25rem;">
+                        When set, input injection will only work when display shows this profile
+                    </small>
+                </div>
             </div>
-        </div>
+
+            <!-- Host-specific settings -->
+            <div id="host-settings" style="display: none; margin-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 0.75rem;">
+                <div class="input-group" style="flex-direction: row; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+                    <input type="checkbox" id="input-capture-enabled" onchange="updateGeneralConfig()">
+                    <label style="margin: 0; cursor: pointer;">Enable Input Capture Mode (Block local keyboard/mouse)</label>
+                </div>
+                <div class="input-group">
+                    <label>Emergency Escape Hotkey:</label>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <input type="text" id="escape-hotkey" onchange="updateGeneralConfig()" placeholder="Ctrl+Alt+Shift+Esc" style="flex: 1;">
+                        <button class="btn btn-small" style="background: #ef4444;" onclick="startRecording('escape')">🔴 Record</button>
+                    </div>
+                    <small style="color: #94a3b8; font-size: 0.875rem; margin-top: 0.25rem;">
+                        Press this to force disable input capture and regain control
+                    </small>
+                </div>
+            </div>
+            </div>
         </div>
 
         <div class="card">
@@ -621,11 +649,16 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             document.getElementById('sleep-hotkey').value = config.general.sleep_hotkey || '';
             document.getElementById('role').value = config.general.role || 'host';
             document.getElementById('coordinator-addr').value = config.general.coordinator_addr || '';
+            document.getElementById('agent-profile').value = config.general.agent_profile || '';
+            document.getElementById('input-capture-enabled').checked = config.general.input_capture_enabled || false;
+            document.getElementById('escape-hotkey').value = config.general.escape_hotkey || 'Ctrl+Alt+Shift+Esc';
             
             const isAgent = config.general.role === 'agent';
             document.getElementById('coordinator-group').style.visibility = isAgent ? 'visible' : 'hidden';
             document.getElementById('add-profile-btn').style.display = isAgent ? 'none' : 'inline-block';
             document.getElementById('agent-sync-notice').style.display = isAgent ? 'block' : 'none';
+            document.getElementById('agent-settings').style.display = isAgent ? 'block' : 'none';
+            document.getElementById('host-settings').style.display = isAgent ? 'none' : 'block';
         }
 
         function toggleCoordinatorUI() {
@@ -642,6 +675,9 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             config.general.sleep_hotkey = document.getElementById('sleep-hotkey').value;
             config.general.role = document.getElementById('role').value;
             config.general.coordinator_addr = document.getElementById('coordinator-addr').value;
+            config.general.agent_profile = document.getElementById('agent-profile').value;
+            config.general.input_capture_enabled = document.getElementById('input-capture-enabled').checked;
+            config.general.escape_hotkey = document.getElementById('escape-hotkey').value;
         }
 
         function renderProfiles() {
@@ -929,6 +965,9 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                     renderGeneral();
                 } else if (recordingIdx === 'sleep') {
                     config.general.sleep_hotkey = currentHotkey;
+                    renderGeneral();
+                } else if (recordingIdx === 'escape') {
+                    config.general.escape_hotkey = currentHotkey;
                     renderGeneral();
                 } else if (recordingIdx !== -1) {
                     config.profiles[recordingIdx].hotkey = currentHotkey;

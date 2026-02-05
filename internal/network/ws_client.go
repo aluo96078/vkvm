@@ -186,8 +186,6 @@ func (c *WSClient) handleMessage(msg protocol.Message) {
 		bytes, _ := json.Marshal(msg.Payload)
 		json.Unmarshal(bytes, &payload)
 
-		log.Printf("WS Client: Received input event: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X)",
-			payload.Type, payload.DeltaX, payload.DeltaY, payload.Button, payload.Pressed, payload.KeyCode)
 		if c.OnInput != nil {
 			c.OnInput(
 				payload.Type,
@@ -196,9 +194,6 @@ func (c *WSClient) handleMessage(msg protocol.Message) {
 				payload.KeyCode, payload.Modifiers,
 				payload.Timestamp,
 			)
-			log.Printf("WS Client: Input event handler executed successfully")
-		} else {
-			log.Printf("WS Client: No input event handler registered")
 		}
 	}
 }
