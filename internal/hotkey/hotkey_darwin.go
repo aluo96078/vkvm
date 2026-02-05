@@ -6,12 +6,13 @@ package hotkey
 #cgo LDFLAGS: -framework CoreGraphics -framework CoreFoundation -framework ApplicationServices
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <stdint.h>
 
 // Forward declaration of the callback
 CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon);
 
-// Helper to start the loop
-static inline void startEventTap(void* refcon) {
+// Helper to start the loop - takes uintptr_t to avoid Go unsafe.Pointer conversion
+static inline void startEventTap(uintptr_t refcon) {
     CGEventMask mask = kCGEventMaskForAllEvents;
     CFMachPortRef tap = CGEventTapCreate(
         kCGSessionEventTap,
@@ -19,7 +20,7 @@ static inline void startEventTap(void* refcon) {
         kCGEventTapOptionListenOnly,
         mask,
         eventCallback,
-        refcon
+        (void*)refcon
     );
 
     if (!tap) {
@@ -45,7 +46,7 @@ import (
 
 //export eventCallback
 func eventCallback(proxy C.CGEventTapProxy, eventType C.CGEventType, event C.CGEventRef, refcon unsafe.Pointer) C.CGEventRef {
-	h := cgo.Handle(refcon)
+	h := cgo.Handle(uintptr(refcon))
 	m := h.Value().(*Manager)
 
 	switch eventType {
@@ -111,7 +112,7 @@ func (m *Manager) startPlatform() error {
 	handle := cgo.NewHandle(m)
 	go func() {
 		log.Println("Hotkey Engine: macOS CGEventTap started.")
-		C.startEventTap(unsafe.Pointer(handle))
+		C.startEventTap(C.uintptr_t(handle))
 	}()
 	return nil
 }

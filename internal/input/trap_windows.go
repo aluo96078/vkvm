@@ -856,9 +856,11 @@ func (t *Trap) keyboardHookProc(nCode int32, wParam uintptr, lParam uintptr) uin
 			Timestamp: time.Now().UnixMilli(),
 		}
 
-		if msg == 0x0100 { // WM_KEYDOWN
+		// WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101
+		// WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105
+		if msg == 0x0100 || msg == 0x0104 { // WM_KEYDOWN or WM_SYSKEYDOWN
 			event.Pressed = true
-		} else if msg == 0x0101 { // WM_KEYUP
+		} else if msg == 0x0101 || msg == 0x0105 { // WM_KEYUP or WM_SYSKEYUP
 			event.Pressed = false
 		}
 

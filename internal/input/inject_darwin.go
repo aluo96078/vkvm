@@ -14,6 +14,7 @@ import (
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <ApplicationServices/ApplicationServices.h>
+#include <math.h>
 
 // Check if we have accessibility permissions
 bool hasAccessibilityPermissions() {
@@ -28,6 +29,16 @@ CGPoint getCurrentMousePosition() {
     return cursor;
 }
 
+// Track button state for drag operations
+static int g_leftButtonDown = 0;
+static int g_rightButtonDown = 0;
+static int g_middleButtonDown = 0;
+
+// Track click state for double-click detection
+static CFAbsoluteTime g_lastClickTime = 0;
+static CGPoint g_lastClickPos = {0, 0};
+static int g_clickCount = 0;
+
 // Helper functions - inject mouse move with relative delta
 void injectMouseMoveRelative(CGFloat dx, CGFloat dy) {
     // Get current mouse position
@@ -36,8 +47,26 @@ void injectMouseMoveRelative(CGFloat dx, CGFloat dy) {
     // Calculate new position
     CGPoint newPos = CGPointMake(currentPos.x + dx, currentPos.y + dy);
 
-    // Create a mouse moved event
-    CGEventRef event = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, newPos, kCGMouseButtonLeft);
+    // Determine event type based on button state (drag vs move)
+    CGEventType eventType;
+    CGMouseButton button = kCGMouseButtonLeft;
+    
+    if (g_leftButtonDown) {
+        eventType = kCGEventLeftMouseDragged;
+        button = kCGMouseButtonLeft;
+    } else if (g_rightButtonDown) {
+        eventType = kCGEventRightMouseDragged;
+        button = kCGMouseButtonRight;
+    } else if (g_middleButtonDown) {
+        eventType = kCGEventOtherMouseDragged;
+        button = kCGMouseButtonCenter;
+    } else {
+        eventType = kCGEventMouseMoved;
+        button = kCGMouseButtonLeft;
+    }
+
+    // Create mouse event
+    CGEventRef event = CGEventCreateMouseEvent(NULL, eventType, newPos, button);
     if (event) {
         // Set relative delta values for proper mouse acceleration handling
         CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, (int64_t)dx);
@@ -74,27 +103,109 @@ void injectMouseButton(int button, bool pressed) {
         }
     }
 
+    // Update button state for drag detection
+    if (button == 1) g_leftButtonDown = pressed ? 1 : 0;
+    else if (button == 2) g_rightButtonDown = pressed ? 1 : 0;
+    else if (button == 3) g_middleButtonDown = pressed ? 1 : 0;
+
     // Get current mouse position for button events
     CGPoint currentPos = getCurrentMousePosition();
+    
+    // Handle click count for double-click detection
+    int clickCount = 1;
+    if (pressed && button == 1) {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        CGFloat distance = sqrt(pow(currentPos.x - g_lastClickPos.x, 2) + pow(currentPos.y - g_lastClickPos.y, 2));
+        
+        // Double-click threshold: 300ms and within 5 pixels
+        if ((now - g_lastClickTime) < 0.3 && distance < 5.0) {
+            g_clickCount++;
+        } else {
+            g_clickCount = 1;
+        }
+        
+        clickCount = g_clickCount;
+        g_lastClickTime = now;
+        g_lastClickPos = currentPos;
+    }
+    
     CGEventRef event = CGEventCreateMouseEvent(NULL, eventType, currentPos, cgButton);
-    CGEventPost(kCGSessionEventTap, event);
-    CFRelease(event);
+    if (event) {
+        // Set click count for proper double-click/triple-click recognition
+        CGEventSetIntegerValueField(event, kCGMouseEventClickState, clickCount);
+        CGEventPost(kCGSessionEventTap, event);
+        CFRelease(event);
+    }
 }
 
 void injectKey(CGKeyCode keyCode, bool pressed, uint16 modifiers) {
-    CGEventType eventType = pressed ? kCGEventKeyDown : kCGEventKeyUp;
-    CGEventRef event = CGEventCreateKeyboardEvent(NULL, keyCode, pressed);
+    // Check if this is a modifier key
+    bool isModifierKey = false;
+    CGEventFlags modifierFlag = 0;
+    
+    switch (keyCode) {
+        case 0x38: // Left Shift
+        case 0x3C: // Right Shift
+            isModifierKey = true;
+            modifierFlag = kCGEventFlagMaskShift;
+            break;
+        case 0x3B: // Left Control
+        case 0x3E: // Right Control
+            isModifierKey = true;
+            modifierFlag = kCGEventFlagMaskControl;
+            break;
+        case 0x3A: // Left Option
+        case 0x3D: // Right Option
+            isModifierKey = true;
+            modifierFlag = kCGEventFlagMaskAlternate;
+            break;
+        case 0x37: // Left Command
+        case 0x36: // Right Command
+            isModifierKey = true;
+            modifierFlag = kCGEventFlagMaskCommand;
+            break;
+    }
+    
+    if (isModifierKey) {
+        // For modifier keys, use kCGEventFlagsChanged
+        CGEventRef event = CGEventCreate(NULL);
+        if (event) {
+            CGEventFlags currentFlags = CGEventGetFlags(event);
+            CFRelease(event);
+            
+            CGEventFlags newFlags;
+            if (pressed) {
+                newFlags = currentFlags | modifierFlag;
+            } else {
+                newFlags = currentFlags & ~modifierFlag;
+            }
+            
+            // Create a flags changed event
+            CGEventRef flagsEvent = CGEventCreateKeyboardEvent(NULL, keyCode, pressed);
+            if (flagsEvent) {
+                CGEventSetType(flagsEvent, kCGEventFlagsChanged);
+                CGEventSetFlags(flagsEvent, newFlags);
+                CGEventPost(kCGSessionEventTap, flagsEvent);
+                CFRelease(flagsEvent);
+            }
+        }
+    } else {
+        // For regular keys, use normal key events
+        CGEventType eventType = pressed ? kCGEventKeyDown : kCGEventKeyUp;
+        CGEventRef event = CGEventCreateKeyboardEvent(NULL, keyCode, pressed);
+        if (event) {
+            // Set modifier flags
+            CGEventFlags flags = 0;
+            if (modifiers & 0x0001) flags |= kCGEventFlagMaskShift;     // Shift
+            if (modifiers & 0x0002) flags |= kCGEventFlagMaskControl;   // Ctrl
+            if (modifiers & 0x0004) flags |= kCGEventFlagMaskAlternate; // Alt
+            if (modifiers & 0x0008) flags |= kCGEventFlagMaskCommand;   // Cmd
 
-    // Set modifier flags
-    CGEventFlags flags = 0;
-    if (modifiers & 0x0001) flags |= kCGEventFlagMaskShift;     // Shift
-    if (modifiers & 0x0002) flags |= kCGEventFlagMaskControl;   // Ctrl
-    if (modifiers & 0x0004) flags |= kCGEventFlagMaskAlternate; // Alt
-    if (modifiers & 0x0008) flags |= kCGEventFlagMaskCommand;   // Cmd
-
-    CGEventSetFlags(event, flags);
-    CGEventPost(kCGSessionEventTap, event);
-    CFRelease(event);
+            CGEventSetFlags(event, flags);
+            CGEventPost(kCGSessionEventTap, event);
+            CFRelease(event);
+        }
+    }
 }
 */
 import "C"
