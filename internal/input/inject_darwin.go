@@ -163,16 +163,33 @@ void injectMouseWheel(int deltaY, int deltaX) {
         scrollDeltaX = deltaX > 0 ? 1 : -1;
     }
 
-    CGEventRef event = CGEventCreateScrollWheelEvent(
-        NULL,
-        kCGScrollEventUnitLine,
-        2,  // wheel count: 2 for both vertical and horizontal
-        scrollDeltaY,
-        scrollDeltaX
-    );
-    if (event) {
-        CGEventPost(kCGSessionEventTap, event);
-        CFRelease(event);
+    // Handle vertical scroll
+    if (scrollDeltaY != 0) {
+        CGEventRef event = CGEventCreateScrollWheelEvent(
+            NULL,
+            kCGScrollEventUnitLine,
+            1,  // wheel count: 1 for vertical only
+            scrollDeltaY
+        );
+        if (event) {
+            CGEventPost(kCGSessionEventTap, event);
+            CFRelease(event);
+        }
+    }
+
+    // Handle horizontal scroll separately
+    if (scrollDeltaX != 0) {
+        CGEventRef event = CGEventCreateScrollWheelEvent(
+            NULL,
+            kCGScrollEventUnitLine,
+            2,  // wheel count: 2 for horizontal
+            0,  // vertical delta
+            scrollDeltaX
+        );
+        if (event) {
+            CGEventPost(kCGSessionEventTap, event);
+            CFRelease(event);
+        }
     }
 }
 
@@ -440,6 +457,7 @@ func (i *Injector) InjectMouseButton(button int, pressed bool) error {
 // deltaY: positive=up, negative=down (vertical scroll)
 // deltaX: positive=right, negative=left (horizontal scroll)
 func (i *Injector) InjectMouseWheel(deltaY, deltaX int) error {
+	log.Printf("InjectMouseWheel called: deltaY=%d, deltaX=%d", deltaY, deltaX)
 	C.injectMouseWheel(C.int(deltaY), C.int(deltaX))
 	return nil
 }
