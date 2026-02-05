@@ -285,13 +285,8 @@ func (t *Trap) SetKillSwitch(callback func()) error {
 func (t *Trap) EnableCapture(enabled bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
 	t.captureEnabled = enabled
-	if enabled {
-		log.Printf("[TRAP] Input capture mode ENABLED - system will not receive input")
-	} else {
-		log.Printf("[TRAP] Input capture mode DISABLED - system will receive input normally")
-	}
+	log.Printf("Input capture %s", map[bool]string{true: "enabled", false: "disabled"}[enabled])
 }
 
 // IsCaptureEnabled returns whether capture mode is currently enabled
@@ -303,10 +298,7 @@ func (t *Trap) IsCaptureEnabled() bool {
 
 // createWindow creates a transparent overlay window
 func (t *Trap) createWindow() error {
-	log.Printf("[DEBUG] Starting window creation process")
-
 	className := syscall.StringToUTF16Ptr("VKVMInputTrap")
-	log.Printf("[DEBUG] Window class name: %s", "VKVMInputTrap")
 
 	// Register window class
 	hInstance, _, _ := GetModuleHandle.Call(0)
@@ -319,25 +311,16 @@ func (t *Trap) createWindow() error {
 		LpszClassName: className,
 	}
 
-	log.Printf("[DEBUG] Registering window class")
 	ret, _, err := RegisterClassEx.Call(uintptr(unsafe.Pointer(&wndClass)))
 	if ret == 0 {
-		log.Printf("[ERROR] RegisterClassEx failed with error: %v", err)
 		return fmt.Errorf("RegisterClassEx failed: %v", err)
 	}
-	log.Printf("[DEBUG] Window class registered successfully")
 
 	// Get screen dimensions
 	var rect RECT
-	log.Printf("[DEBUG] Getting screen dimensions")
 	SystemParametersInfo.Call(uintptr(SPI_GETWORKAREA), 0, uintptr(unsafe.Pointer(&rect)), 0)
-	screenWidth := rect.Right - rect.Left
-	screenHeight := rect.Bottom - rect.Top
-
-	log.Printf("[DEBUG] Screen dimensions obtained: %dx%d", screenWidth, screenHeight)
 
 	// Create a layered window for receiving raw input messages
-	log.Printf("[DEBUG] Creating layered window for raw input")
 	hwnd, _, err := CreateWindowEx.Call(
 		WS_EX_LAYERED|WS_EX_TRANSPARENT, // layered and transparent
 		uintptr(unsafe.Pointer(className)),
@@ -347,12 +330,10 @@ func (t *Trap) createWindow() error {
 		0, 0, 0, 0,
 	)
 	if hwnd == 0 {
-		log.Printf("[ERROR] CreateWindowEx failed with error: %v", err)
 		return fmt.Errorf("CreateWindowEx failed: %v", err)
 	}
 
 	t.hwnd = syscall.Handle(hwnd)
-	log.Printf("[DEBUG] Layered window created with HWND: %d", hwnd)
 
 	// Set window to be almost completely transparent (but visible)
 	SetLayeredWindowAttributes.Call(uintptr(hwnd), 0, 1, LWA_ALPHA)
@@ -360,7 +341,6 @@ func (t *Trap) createWindow() error {
 	// Try to bring window to foreground
 	SetForegroundWindow.Call(uintptr(hwnd))
 
-	log.Printf("[DEBUG] Window creation completed successfully")
 	return nil
 }
 
@@ -388,8 +368,6 @@ func (t *Trap) messageLoop() {
 
 // registerRawInput registers for raw mouse input
 func (t *Trap) registerRawInput() error {
-	log.Printf("Registering Raw Input devices for mouse and keyboard")
-
 	rids := []RAWINPUTDEVICE{
 		{
 			UsUsagePage: 0x01, // HID_USAGE_PAGE_GENERIC
@@ -406,20 +384,16 @@ func (t *Trap) registerRawInput() error {
 	}
 
 	for i, rid := range rids {
-		log.Printf("Raw Input device %d struct: %+v", i, rid)
-
 		ret, _, err := RegisterRawInputDevices.Call(
 			uintptr(unsafe.Pointer(&rids[i])),
 			1,
 			uintptr(unsafe.Sizeof(rid)),
 		)
 		if ret == 0 {
-			log.Printf("RegisterRawInputDevices call failed for device %d with return value: %d", i, ret)
 			return fmt.Errorf("RegisterRawInputDevices failed for device %d: %v", i, err)
 		}
 	}
 
-	log.Printf("Raw Input devices registered successfully")
 	return nil
 }
 
@@ -438,8 +412,6 @@ func (t *Trap) registerKillSwitch() error {
 
 	// Check if it's the "already registered" error
 	if errno, ok := err.(syscall.Errno); ok && errno == 1409 { // ERROR_HOTKEY_ALREADY_REGISTERED
-		log.Printf("Warning: Ctrl+Alt+Esc is already registered. Trying alternative hotkeys...")
-
 		// Try alternative hotkeys
 		alternatives := []struct {
 			modifiers uint32
@@ -459,7 +431,6 @@ func (t *Trap) registerKillSwitch() error {
 				uintptr(alt.key),
 			)
 			if ret != 0 {
-				log.Printf("Successfully registered alternative kill switch: %s", alt.desc)
 				return nil
 			}
 		}
@@ -489,13 +460,11 @@ func (t *Trap) setupCursorClipping() error {
 
 // windowProc handles window messages
 func (t *Trap) windowProc(hwnd syscall.Handle, msg uint32, wparam uintptr, lparam uintptr) uintptr {
-	log.Printf("[DEBUG] WindowProc received message: 0x%X (hwnd: %d)", msg, hwnd)
 	switch msg {
 	case WM_INPUT:
 		t.handleRawInput(lparam)
 		return 0
 	case WM_INPUT_DEVICE_CHANGE:
-		log.Printf("[DEBUG] Raw input device change detected")
 		return 0
 	case WM_HOTKEY:
 		if t.killSwitch != nil {
@@ -517,12 +486,10 @@ func (t *Trap) windowProc(hwnd syscall.Handle, msg uint32, wparam uintptr, lpara
 
 // handleRawInput processes raw input data
 func (t *Trap) handleRawInput(lparam uintptr) {
-	log.Printf("Received WM_INPUT message, processing raw input data")
-
 	var size uint32 = 0
 
 	// Get the size of the raw input data (first call with NULL data pointer)
-	ret, _, err := GetRawInputData.Call(
+	ret, _, _ := GetRawInputData.Call(
 		lparam,
 		RID_INPUT,
 		0, // NULL data pointer
@@ -530,21 +497,13 @@ func (t *Trap) handleRawInput(lparam uintptr) {
 		unsafe.Sizeof(RAWINPUTHEADER{}),
 	)
 
-	if ret == 0xFFFFFFFF { // error
-		log.Printf("GetRawInputData (size query) failed: ret=0x%X, err=%v", ret, err)
+	if ret == 0xFFFFFFFF || size == 0 {
 		return
 	}
-
-	if size == 0 {
-		log.Printf("Raw input data size is 0, skipping")
-		return
-	}
-
-	log.Printf("Raw input data size: %d bytes", size)
 
 	// Allocate buffer for raw input data
 	data := make([]byte, size)
-	ret, _, err = GetRawInputData.Call(
+	ret, _, _ = GetRawInputData.Call(
 		lparam,
 		RID_INPUT,
 		uintptr(unsafe.Pointer(&data[0])),
@@ -552,40 +511,24 @@ func (t *Trap) handleRawInput(lparam uintptr) {
 		unsafe.Sizeof(RAWINPUTHEADER{}),
 	)
 
-	if ret == 0xFFFFFFFF { // error
-		log.Printf("GetRawInputData (data retrieval) failed: ret=0x%X, err=%v", ret, err)
+	if ret == 0xFFFFFFFF || ret == 0 {
 		return
 	}
-
-	if ret == 0 {
-		log.Printf("GetRawInputData returned 0 bytes, skipping")
-		return
-	}
-
-	log.Printf("Successfully retrieved %d bytes of raw input data", ret)
 
 	// Parse the raw input data
 	rawInput := (*RAWINPUT)(unsafe.Pointer(&data[0]))
-	log.Printf("Raw input type: %d", rawInput.Header.DwType)
 
 	if rawInput.Header.DwType == RIM_TYPEMOUSE {
-		log.Printf("Processing mouse input event")
 		t.handleMouseInput(&rawInput.Mouse)
 	} else if rawInput.Header.DwType == RIM_TYPEKEYBOARD {
-		log.Printf("Processing keyboard input event")
 		// Access keyboard data from the union
 		keyboard := (*RAWKEYBOARD)(unsafe.Pointer(&rawInput.Mouse))
 		t.handleKeyboardInput(keyboard)
-	} else {
-		log.Printf("Ignoring input event (type: %d)", rawInput.Header.DwType)
 	}
 }
 
 // handleMouseInput processes mouse input events
 func (t *Trap) handleMouseInput(mouse *RAWMOUSE) {
-	log.Printf("Processing mouse input: flags=0x%X, buttons=0x%X, lastX=%d, lastY=%d",
-		mouse.UsFlags, mouse.UsButtonFlags, mouse.LLastX, mouse.LLastY)
-
 	// Handle mouse movement (only if there's actual movement)
 	if mouse.LLastX != 0 || mouse.LLastY != 0 {
 		event := InputEvent{
@@ -599,20 +542,15 @@ func (t *Trap) handleMouseInput(mouse *RAWMOUSE) {
 		t.cursorX += event.DeltaX
 		t.cursorY += event.DeltaY
 
-		log.Printf("Updated virtual cursor position: (%d, %d)", t.cursorX, t.cursorY)
-
-		log.Printf("Sending mouse move event to channel: %+v", event)
 		select {
 		case t.events <- event:
-			log.Printf("Mouse move event sent to channel successfully")
 		default:
-			log.Printf("Event channel full, dropping mouse move event")
+			// Channel full, drop event
 		}
 	}
 
 	// Handle mouse buttons (separate events)
 	if mouse.UsButtonFlags&0x0001 != 0 { // RI_MOUSE_LEFT_BUTTON_DOWN
-		log.Printf("Left mouse button down")
 		event := InputEvent{
 			Type:      "mouse_btn",
 			Button:    1,
@@ -622,10 +560,8 @@ func (t *Trap) handleMouseInput(mouse *RAWMOUSE) {
 		select {
 		case t.events <- event:
 		default:
-			log.Printf("Event channel full, dropping left button down event")
 		}
 	} else if mouse.UsButtonFlags&0x0002 != 0 { // RI_MOUSE_LEFT_BUTTON_UP
-		log.Printf("Left mouse button up")
 		event := InputEvent{
 			Type:      "mouse_btn",
 			Button:    1,
@@ -635,10 +571,8 @@ func (t *Trap) handleMouseInput(mouse *RAWMOUSE) {
 		select {
 		case t.events <- event:
 		default:
-			log.Printf("Event channel full, dropping left button up event")
 		}
 	} else if mouse.UsButtonFlags&0x0004 != 0 { // RI_MOUSE_RIGHT_BUTTON_DOWN
-		log.Printf("Right mouse button down")
 		event := InputEvent{
 			Type:      "mouse_btn",
 			Button:    2,
@@ -648,10 +582,8 @@ func (t *Trap) handleMouseInput(mouse *RAWMOUSE) {
 		select {
 		case t.events <- event:
 		default:
-			log.Printf("Event channel full, dropping right button down event")
 		}
 	} else if mouse.UsButtonFlags&0x0008 != 0 { // RI_MOUSE_RIGHT_BUTTON_UP
-		log.Printf("Right mouse button up")
 		event := InputEvent{
 			Type:      "mouse_btn",
 			Button:    2,
@@ -661,10 +593,8 @@ func (t *Trap) handleMouseInput(mouse *RAWMOUSE) {
 		select {
 		case t.events <- event:
 		default:
-			log.Printf("Event channel full, dropping right button up event")
 		}
 	} else if mouse.UsButtonFlags&0x0010 != 0 { // RI_MOUSE_MIDDLE_BUTTON_DOWN
-		log.Printf("Middle mouse button down")
 		event := InputEvent{
 			Type:      "mouse_btn",
 			Button:    3,
@@ -674,10 +604,8 @@ func (t *Trap) handleMouseInput(mouse *RAWMOUSE) {
 		select {
 		case t.events <- event:
 		default:
-			log.Printf("Event channel full, dropping middle button down event")
 		}
 	} else if mouse.UsButtonFlags&0x0020 != 0 { // RI_MOUSE_MIDDLE_BUTTON_UP
-		log.Printf("Middle mouse button up")
 		event := InputEvent{
 			Type:      "mouse_btn",
 			Button:    3,
@@ -687,16 +615,12 @@ func (t *Trap) handleMouseInput(mouse *RAWMOUSE) {
 		select {
 		case t.events <- event:
 		default:
-			log.Printf("Event channel full, dropping middle button up event")
 		}
 	}
 }
 
 // handleKeyboardInput processes keyboard input events
 func (t *Trap) handleKeyboardInput(keyboard *RAWKEYBOARD) {
-	log.Printf("Processing keyboard input: makeCode=0x%X, flags=0x%X, vKey=0x%X, message=%d",
-		keyboard.MakeCode, keyboard.Flags, keyboard.VKey, keyboard.Message)
-
 	event := InputEvent{
 		Type:      "key",
 		KeyCode:   uint16(keyboard.VKey),
@@ -706,25 +630,18 @@ func (t *Trap) handleKeyboardInput(keyboard *RAWKEYBOARD) {
 	// Check if key is pressed or released
 	if keyboard.Flags&0x01 != 0 { // RI_KEY_BREAK
 		event.Pressed = false
-		log.Printf("Key released: 0x%X", keyboard.VKey)
 	} else {
 		event.Pressed = true
-		log.Printf("Key pressed: 0x%X", keyboard.VKey)
 	}
 
-	log.Printf("Sending keyboard event to channel: %+v", event)
 	select {
 	case t.events <- event:
-		log.Printf("Keyboard event sent to channel successfully")
 	default:
-		log.Printf("Event channel full, dropping keyboard event")
 	}
 }
 
 // setupHooks sets up low-level mouse and keyboard hooks
 func (t *Trap) setupHooks() error {
-	log.Printf("Setting up low-level input hooks")
-
 	// Set up mouse hook
 	mouseHook, _, err := SetWindowsHookEx.Call(
 		WH_MOUSE_LL,
@@ -733,11 +650,9 @@ func (t *Trap) setupHooks() error {
 		0, // dwThreadId (0 = all threads)
 	)
 	if mouseHook == 0 {
-		log.Printf("SetWindowsHookEx for mouse failed")
 		return fmt.Errorf("failed to set mouse hook: %v", err)
 	}
 	t.mouseHook = syscall.Handle(mouseHook)
-	log.Printf("Mouse hook installed successfully")
 
 	// Set up keyboard hook
 	keyHook, _, err := SetWindowsHookEx.Call(
@@ -747,25 +662,20 @@ func (t *Trap) setupHooks() error {
 		0, // dwThreadId (0 = all threads)
 	)
 	if keyHook == 0 {
-		log.Printf("SetWindowsHookEx for keyboard failed")
 		// Clean up mouse hook
 		UnhookWindowsHookEx.Call(mouseHook)
 		t.mouseHook = 0
 		return fmt.Errorf("failed to set keyboard hook: %v", err)
 	}
 	t.keyHook = syscall.Handle(keyHook)
-	log.Printf("Keyboard hook installed successfully")
 
 	return nil
 }
 
 // hookThread runs hooks in a dedicated thread with message loop
 func (t *Trap) hookThread() {
-	log.Printf("Starting hook thread")
-
 	// Set up input hooks in this thread
 	if err := t.setupHooks(); err != nil {
-		log.Printf("Failed to setup hooks in hook thread: %v", err)
 		return
 	}
 
@@ -784,8 +694,6 @@ func (t *Trap) hookThread() {
 		TranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
 		DispatchMessage.Call(uintptr(unsafe.Pointer(&msg)))
 	}
-
-	log.Printf("Hook thread exiting")
 }
 
 // mouseHookProc handles mouse hook events
@@ -840,11 +748,6 @@ func (t *Trap) mouseHookProc(nCode int32, wParam uintptr, lParam uintptr) uintpt
 			event.Type = "mouse_btn"
 			event.Button = 3
 			event.Pressed = false
-		}
-
-		// Only log button events to reduce spam
-		if event.Type == "mouse_btn" {
-			log.Printf("[HOOK] Mouse button: %s", event.Type)
 		}
 
 		select {

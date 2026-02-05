@@ -20,7 +20,12 @@ CGPoint getCurrentMousePosition() {
     CGEventRef event = CGEventCreate(NULL);
     CGPoint cursor = CGEventGetLocation(event);
     CFRelease(event);
-    return cursor;
+    return cursor;vu04y94
+    vmpcl5jbj
+    5/t;xk
+    <u6tj6
+    vu;ej0
+    logu3wu6elvu/s/
 }
 
 // Helper functions - inject mouse move with relative delta
@@ -29,7 +34,10 @@ void injectMouseMove(CGFloat dx, CGFloat dy) {
     CGPoint currentPos = getCurrentMousePosition();
     
     // Calculate new position
-    CGPoint newPos = CGPointMake(currentPos.x + dx, currentPos.y + dy);
+    CGPoint newPo
+    
+    
+    s = CGPointMake(currentPos.x + dx, currentPos.y + dy);
     
     // Create mouse moved event at the new position
     CGEventRef event = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, newPos, kCGMouseButtonLeft);
@@ -214,13 +222,6 @@ type Injector struct{}
 
 // NewInjector creates a new input injector for macOS
 func NewInjector() *Injector {
-	// Check accessibility permissions
-	if !C.hasAccessibilityPermissions() {
-		fmt.Printf("[DARWIN-INJECT] WARNING: Accessibility permissions not granted!\n")
-		fmt.Printf("[DARWIN-INJECT] Please enable 'Accessibility' permission for this application in System Preferences > Security & Privacy > Privacy > Accessibility\n")
-	} else {
-		fmt.Printf("[DARWIN-INJECT] Accessibility permissions granted\n")
-	}
 	return &Injector{}
 }
 
@@ -252,7 +253,6 @@ func (i *Injector) InjectKey(keyCode uint16, pressed bool, modifiers uint16) err
 	// Convert Windows VK code to macOS CGKeyCode
 	macKeyCode, ok := windowsToMacKeyMap[keyCode]
 	if !ok {
-		fmt.Printf("[DARWIN-INJECT] Unknown Windows VK code: 0x%X, passing through\n", keyCode)
 		macKeyCode = keyCode // Fallback: pass through (likely won't work correctly)
 	}
 

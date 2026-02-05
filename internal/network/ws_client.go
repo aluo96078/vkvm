@@ -63,11 +63,9 @@ func (c *WSClient) loop() {
 
 func (c *WSClient) connect() {
 	u := url.URL{Scheme: "ws", Host: c.hostAddr, Path: "/ws"}
-	log.Printf("WS Client: Connecting to %s", u.String())
 
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		log.Printf("WS Client: Connection failed: %v", err)
 		return
 	}
 	defer conn.Close()
@@ -76,8 +74,6 @@ func (c *WSClient) connect() {
 	c.conn = conn
 	c.isConnected = true
 	c.mu.Unlock()
-
-	log.Println("WS Client: Connected to Host")
 
 	// Send Auth/Handshake immediately
 	// For now we assume open or token header, but let's send an Identify if needed.
@@ -113,15 +109,11 @@ func (c *WSClient) readPump(conn *websocket.Conn) {
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("WS Client: Read error: %v", err)
-			}
 			break
 		}
 
 		var msg protocol.Message
 		if err := json.Unmarshal(data, &msg); err != nil {
-			log.Printf("WS Client: Invalid message: %v", err)
 			continue
 		}
 
@@ -139,11 +131,9 @@ func (c *WSClient) writePump(conn *websocket.Conn) {
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			jsonMsg, err := json.Marshal(msg)
 			if err != nil {
-				log.Printf("WS Client: Marshal error: %v", err)
 				continue
 			}
 			if err := conn.WriteMessage(websocket.TextMessage, jsonMsg); err != nil {
-				log.Printf("WS Client: Write error: %v", err)
 				return
 			}
 
@@ -176,7 +166,6 @@ func (c *WSClient) handleMessage(msg protocol.Message) {
 		bytes, _ := json.Marshal(msg.Payload)
 		json.Unmarshal(bytes, &payload)
 
-		log.Printf("WS Client: Received config sync")
 		if c.OnSync != nil {
 			c.OnSync(payload.Profiles)
 		}

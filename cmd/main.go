@@ -160,6 +160,9 @@ func runService(cfgMgr *config.Manager) {
 	// WebSocket client for agent mode
 	var wsClient *network.WSClient
 
+	// Input trap for host mode
+	var inputTrap *input.Trap
+
 	// Start API server if enabled
 	cfg := cfgMgr.Get()
 	var apiServer *api.Server
@@ -181,6 +184,13 @@ func runService(cfgMgr *config.Manager) {
 			// Origin is "host" because this callback is triggered by a local decision/action on the host
 			// (or a successfully processed agent request)
 			apiServer.BroadcastSwitch(profileName, "host")
+
+			// Local logic for host: control input capture based on active profile
+			if cfg.General.Role == "host" && inputTrap != nil && cfg.General.AgentProfile != "" {
+				allowCapture := (profileName == cfg.General.AgentProfile)
+				log.Printf("Switch to profile '%s', agent profile '%s', allow capture: %v", profileName, cfg.General.AgentProfile, allowCapture)
+				inputTrap.EnableCapture(allowCapture)
+			}
 		})
 
 		go func() {
@@ -196,11 +206,8 @@ func runService(cfgMgr *config.Manager) {
 		log.Printf("Warning: Hotkey Engine failed to start: %v", err)
 	}
 
-	// Debug: Log configuration
 	// Input handling based on role
 	if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" {
-		log.Printf("[AGENT] Starting agent mode to receive input from host")
-
 		// Create input injector
 		injector := input.NewInjector()
 
@@ -212,8 +219,6 @@ func runService(cfgMgr *config.Manager) {
 
 		// Periodic detection of current display state
 		if cfg.General.AgentProfile != "" {
-			log.Printf("[AGENT] Auto-detect enabled: will only inject when profile is '%s'", cfg.General.AgentProfile)
-
 			// Start detection goroutine
 			go func() {
 				ticker := time.NewTicker(1 * time.Second) // Check every second
@@ -222,28 +227,16 @@ func runService(cfgMgr *config.Manager) {
 				for range ticker.C {
 					detectedProfile, err := sw.DetectActiveProfile()
 					if err != nil {
-						log.Printf("[AGENT] Detection error: %v", err)
 						continue
 					}
 
 					injectionMutex.Lock()
-					previousState := allowInjection
 					allowInjection = (detectedProfile == cfg.General.AgentProfile)
 					injectionMutex.Unlock()
-
-					// Log state changes
-					if previousState != allowInjection {
-						if allowInjection {
-							log.Printf("[AGENT] Display switched to '%s' - ENABLING input injection", detectedProfile)
-						} else {
-							log.Printf("[AGENT] Display switched to '%s' - DISABLING input injection", detectedProfile)
-						}
-					}
 				}
 			}()
 		} else {
 			// Auto-detect disabled, always allow injection
-			log.Printf("[AGENT] Auto-detect disabled: injection always enabled")
 			allowInjection = true
 		}
 
@@ -263,63 +256,63 @@ func runService(cfgMgr *config.Manager) {
 			}
 
 			// Inject input on Agent
-			var err error
 			switch eventType {
 			case "mouse_move":
-				err = injector.InjectMouseMove(deltaX, deltaY)
-				if err != nil {
-					log.Printf("[AGENT] Failed to inject mouse move: %v", err)
-				}
+				injector.InjectMouseMove(deltaX, deltaY)
 			case "mouse_btn":
-				err = injector.InjectMouseButton(button, pressed)
-				if err != nil {
-					log.Printf("[AGENT] Failed to inject mouse button: %v", err)
-				}
+				injector.InjectMouseButton(button, pressed)
 			case "key":
-				err = injector.InjectKey(keyCode, pressed, modifiers)
-				if err != nil {
-					log.Printf("[AGENT] Failed to inject key: %v", err)
-				}
-			default:
-				log.Printf("[AGENT] Unknown event type: %s", eventType)
+				injector.InjectKey(keyCode, pressed, modifiers)
+			}
+		}
+
+		// Set up switch event handler to control injection based on active profile
+		wsClient.OnSwitch = func(profile string) {
+			// When a switch event is received, immediately check the current active profile via DDC
+			detectedProfile, err := sw.DetectActiveProfile()
+			if err != nil {
+				log.Printf("Failed to detect active profile: %v", err)
+				return
+			}
+
+			injectionMutex.Lock()
+			defer injectionMutex.Unlock()
+			if cfg.General.AgentProfile != "" {
+				allowInjection = (detectedProfile == cfg.General.AgentProfile)
+			} else {
+				// If no specific agent profile configured, always allow injection
+				allowInjection = true
 			}
 		}
 
 		wsClient.Start()
-		log.Printf("[AGENT] Connected to host, ready to receive input events")
 	} else if cfg.General.Role == "host" {
-		log.Printf("[HOST] Starting host mode - will capture input and send to agents")
-
-		// Check if input capture mode is enabled
-		if cfg.General.InputCaptureEnabled {
-			log.Printf("[HOST] ⚠️  INPUT CAPTURE MODE ENABLED ⚠️")
-			log.Printf("[HOST] Local keyboard/mouse will be BLOCKED when active")
-			log.Printf("[HOST] Emergency escape hotkey: %s", cfg.General.EscapeHotkey)
-		}
-
 		// Start input capture on host
-		inputTrap := input.NewTrap()
+		inputTrap = input.NewTrap()
 
-		// Enable capture mode if configured
-		if cfg.General.InputCaptureEnabled {
+		log.Printf("Host mode: AgentProfile='%s'", cfg.General.AgentProfile)
+
+		// Initial capture state: check current profile
+		if cfg.General.AgentProfile != "" {
+			detectedProfile, err := sw.DetectActiveProfile()
+			if err == nil && detectedProfile == cfg.General.AgentProfile {
+				log.Printf("Initial profile '%s' matches agent profile, enabling capture", detectedProfile)
+				inputTrap.EnableCapture(true)
+			} else {
+				log.Printf("Initial profile '%s' does not match agent profile '%s', capture disabled", detectedProfile, cfg.General.AgentProfile)
+			}
+		} else if cfg.General.InputCaptureEnabled {
+			// Fallback to config if no agent profile set
+			log.Printf("No agent profile set, using config InputCaptureEnabled: %v", cfg.General.InputCaptureEnabled)
 			inputTrap.EnableCapture(true)
+		} else {
+			log.Printf("Input capture not enabled")
 		}
 
-		if err := inputTrap.Start(); err != nil {
-			log.Printf("[HOST] Failed to start input capture: %v", err)
-		} else {
-			log.Printf("[HOST] Input capture started, will send events to agents")
-
+		if err := inputTrap.Start(); err == nil {
 			// Process captured events and broadcast to all connected agents
 			go func() {
-				eventCount := 0
-				apiUnavailableLogged := false
 				for event := range inputTrap.Events() {
-					eventCount++
-					if eventCount%1000 == 0 { // Log progress every 1000 events
-						log.Printf("[HOST] Sent %d events to agents", eventCount)
-					}
-
 					// Broadcast input event to all connected agents via API server
 					if apiServer != nil {
 						apiServer.BroadcastInput(
@@ -329,9 +322,6 @@ func runService(cfgMgr *config.Manager) {
 							event.KeyCode, event.Modifiers,
 							event.Timestamp,
 						)
-					} else if !apiUnavailableLogged {
-						log.Printf("[HOST] API server not available, cannot broadcast events")
-						apiUnavailableLogged = true
 					}
 				}
 			}()
@@ -360,16 +350,20 @@ func runService(cfgMgr *config.Manager) {
 		hkMgr.Clear() // Clear existing registered callbacks
 
 		// Register emergency escape hotkey for Host with input capture
-		if cfg.General.Role == "host" && cfg.General.InputCaptureEnabled && cfg.General.EscapeHotkey != "" {
+		if cfg.General.Role == "host" && cfg.General.EscapeHotkey != "" {
 			_, err := hkMgr.Register(cfg.General.EscapeHotkey, func() {
 				log.Printf("EMERGENCY: Escape hotkey pressed - disabling input capture")
+				if inputTrap != nil {
+					inputTrap.EnableCapture(false)
+				}
+				// Also update config to persist the disabled state
 				cfg := cfgMgr.Get()
 				cfg.General.InputCaptureEnabled = false
 				cfgMgr.Set(cfg)
 				if err := cfgMgr.Save(); err != nil {
 					log.Printf("Failed to save config: %v", err)
 				}
-				log.Printf("Input capture disabled. Please restart the application for changes to take effect.")
+				log.Printf("Input capture disabled. Use settings to re-enable.")
 			})
 			if err != nil {
 				log.Printf("Warning: failed to register escape hotkey: %v", err)
@@ -590,9 +584,6 @@ func runWindowsInputTest(cfgMgr *config.Manager) {
 
 		// Set up event handler for received input events
 		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
-			log.Printf("[AGENT] Received input event: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X, modifiers:0x%X)",
-				eventType, deltaX, deltaY, button, pressed, keyCode, modifiers)
-
 			// TODO: Inject input on Windows agent
 			// For now, just log the received events
 		}
