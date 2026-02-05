@@ -42,3 +42,5 @@ config.json
 # Embedded tools (except tracked ones)
 internal/embedded/tools/*.exe
 !internal/embedded/tools/.gitkeep
+vkvm-*.exe
+vkvm-macos-test

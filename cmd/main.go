@@ -17,6 +17,8 @@ import (
 	"vkvm/internal/api"
 	"vkvm/internal/config"
 	"vkvm/internal/hotkey"
+	"vkvm/internal/input"
+	"vkvm/internal/network"
 	"vkvm/internal/osutils"
 	"vkvm/internal/switcher"
 	"vkvm/internal/tray"
@@ -24,11 +26,12 @@ import (
 )
 
 var (
-	version  = "0.2.0"
-	showUI   = flag.Bool("ui", false, "Open the configuration UI")
-	listMons = flag.Bool("list", false, "List connected monitors")
-	switchTo = flag.String("switch", "", "Switch to profile name")
-	showVer  = flag.Bool("version", false, "Show version")
+	version   = "0.2.0"
+	showUI    = flag.Bool("ui", false, "Open the configuration UI")
+	listMons  = flag.Bool("list", false, "List connected monitors")
+	switchTo  = flag.String("switch", "", "Switch to profile name")
+	showVer   = flag.Bool("version", false, "Show version")
+	testInput = flag.Bool("test-input", false, "Test input capture and forwarding")
 )
 
 func main() {
@@ -63,6 +66,12 @@ func main() {
 	// Handle --ui flag
 	if *showUI {
 		runUI(cfgMgr)
+		return
+	}
+
+	// Handle --test-input flag
+	if *testInput {
+		runInputTest(cfgMgr)
 		return
 	}
 
@@ -367,4 +376,134 @@ func runService(cfgMgr *config.Manager) {
 
 	log.Println("VKVM Service running. Press Ctrl+C to stop.")
 	t.Run()
+}
+
+func runInputTest(cfgMgr *config.Manager) {
+	log.Println("Starting input forwarding test...")
+
+	switch runtime.GOOS {
+	case "windows":
+		runWindowsInputTest(cfgMgr)
+	case "darwin":
+		runMacInputTest(cfgMgr)
+	default:
+		log.Fatalf("Input test not supported on %s", runtime.GOOS)
+	}
+}
+
+func runWindowsInputTest(cfgMgr *config.Manager) {
+	log.Println("Running Windows input capture test")
+
+	// Check if running as administrator
+	if runtime.GOOS == "windows" {
+		// Simple check for administrator privileges on Windows
+		// This is a basic check - in production you might want more robust checking
+		log.Println("Note: Raw Input capture requires administrator privileges")
+		log.Println("Please ensure you're running this application as Administrator")
+	}
+
+	// Create input trap
+	trap := input.NewTrap()
+
+	// Set up kill switch callback
+	trap.SetKillSwitch(func() {
+		log.Println("Kill switch activated - stopping input capture")
+		trap.Stop()
+	})
+
+	// Create WebSocket client
+	cfg := cfgMgr.Get()
+	if cfg.General.Role != "agent" || cfg.General.CoordinatorAddr == "" {
+		log.Println("Warning: Not configured as agent or no coordinator address")
+		log.Println("Please configure as agent and set coordinator address for full test")
+	}
+
+	var wsClient *network.WSClient
+	if cfg.General.CoordinatorAddr != "" {
+		log.Printf("Connecting to coordinator: %s", cfg.General.CoordinatorAddr)
+		wsClient = network.NewWSClient(cfg.General.CoordinatorAddr, cfg.General.APIToken)
+		wsClient.Start()
+		defer wsClient.Close()
+	}
+
+	// Start capturing input
+	log.Println("Starting input capture... Press Ctrl+Alt+Esc to stop")
+	if err := trap.Start(); err != nil {
+		log.Fatalf("Failed to start input capture: %v", err)
+	}
+	log.Println("Input capture started successfully")
+
+	// Process events
+	eventCount := 0
+	log.Println("Waiting for input events...")
+	for event := range trap.Events() {
+		eventCount++
+		log.Printf("Event #%d: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X)",
+			eventCount, event.Type, event.DeltaX, event.DeltaY,
+			event.Button, event.Pressed, event.KeyCode)
+
+		// Send to remote if WebSocket is connected
+		if wsClient != nil && wsClient.IsConnected() {
+			log.Printf("Sending event to remote host")
+			wsClient.SendInputEvent(
+				event.Type,
+				event.DeltaX, event.DeltaY,
+				event.Button, event.Pressed,
+				event.KeyCode, event.Modifiers,
+				event.Timestamp,
+			)
+		} else if wsClient != nil {
+			log.Printf("WebSocket not connected, event not sent")
+		}
+	}
+
+	log.Printf("Input test completed. Processed %d events", eventCount)
+}
+
+func runMacInputTest(cfgMgr *config.Manager) {
+	log.Println("Running macOS input injection test")
+
+	// Create input injector
+	injector := input.NewInjector()
+
+	// Create WebSocket client for receiving events
+	cfg := cfgMgr.Get()
+	var wsClient *network.WSClient
+	if cfg.General.CoordinatorAddr != "" {
+		wsClient = network.NewWSClient(cfg.General.CoordinatorAddr, cfg.General.APIToken)
+
+		// Set up event handler
+		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
+			log.Printf("Received input: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X)",
+				eventType, deltaX, deltaY, button, pressed, keyCode)
+
+			switch eventType {
+			case "mouse_move":
+				if err := injector.InjectMouseMove(deltaX, deltaY); err != nil {
+					log.Printf("Failed to inject mouse move: %v", err)
+				}
+			case "mouse_btn":
+				if err := injector.InjectMouseButton(button, pressed); err != nil {
+					log.Printf("Failed to inject mouse button: %v", err)
+				}
+			case "key":
+				if err := injector.InjectKey(keyCode, pressed, modifiers); err != nil {
+					log.Printf("Failed to inject key: %v", err)
+				}
+			}
+		}
+
+		wsClient.Start()
+		defer wsClient.Close()
+	}
+
+	// Wait for events
+	log.Println("Waiting for input events... Press Ctrl+C to stop")
+
+	// Handle signals
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+
+	log.Println("Input injection test completed")
 }
