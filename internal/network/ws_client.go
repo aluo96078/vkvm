@@ -24,7 +24,7 @@ type WSClient struct {
 	// Callbacks
 	OnSwitch func(profile string)
 	OnSync   func(profiles interface{})
-	OnInput  func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64)
+	OnInput  func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64)
 
 	mu          sync.Mutex
 	isConnected bool
@@ -181,6 +181,7 @@ func (c *WSClient) handleMessage(msg protocol.Message) {
 				payload.DeltaX, payload.DeltaY,
 				payload.Button, payload.Pressed,
 				payload.KeyCode, payload.Modifiers,
+				payload.WheelDelta,
 				payload.Timestamp,
 			)
 		}
@@ -207,18 +208,19 @@ func (c *WSClient) SendSyncRequest() {
 }
 
 // SendInputEvent sends keyboard/mouse input events to host
-func (c *WSClient) SendInputEvent(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
+func (c *WSClient) SendInputEvent(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64) {
 	c.send <- protocol.Message{
 		Type: protocol.TypeInput,
 		Payload: protocol.InputPayload{
-			Type:      eventType,
-			DeltaX:    deltaX,
-			DeltaY:    deltaY,
-			Button:    button,
-			Pressed:   pressed,
-			KeyCode:   keyCode,
-			Modifiers: modifiers,
-			Timestamp: timestamp,
+			Type:       eventType,
+			DeltaX:     deltaX,
+			DeltaY:     deltaY,
+			Button:     button,
+			Pressed:    pressed,
+			KeyCode:    keyCode,
+			Modifiers:  modifiers,
+			WheelDelta: wheelDelta,
+			Timestamp:  timestamp,
 		},
 	}
 }

@@ -68,6 +68,12 @@ const (
 	WM_RBUTTONUP           = 0x0205
 	WM_MBUTTONDOWN         = 0x0207
 	WM_MBUTTONUP           = 0x0208
+	WM_MOUSEWHEEL          = 0x020A
+	WM_MOUSEHWHEEL         = 0x020E
+	WM_XBUTTONDOWN         = 0x020B
+	WM_XBUTTONUP           = 0x020C
+	XBUTTON1               = 0x0001
+	XBUTTON2               = 0x0002
 	CW_USEDEFAULT          = 0x80000000
 	SPI_GETWORKAREA        = 0x0030
 )
@@ -808,6 +814,35 @@ func (t *Trap) mouseHookProc(nCode int32, wParam uintptr, lParam uintptr) uintpt
 		case WM_MBUTTONUP:
 			event.Type = "mouse_btn"
 			event.Button = 3
+			event.Pressed = false
+		case WM_MOUSEWHEEL:
+			event.Type = "mouse_wheel"
+			// WheelDelta is in the high-order word of MouseData (HIWORD)
+			wheelDelta := int16(hookStruct.MouseData >> 16)
+			event.WheelDelta = int(wheelDelta)
+		case WM_MOUSEHWHEEL:
+			event.Type = "mouse_wheel_h"
+			// Horizontal wheel delta
+			wheelDelta := int16(hookStruct.MouseData >> 16)
+			event.WheelDelta = int(wheelDelta)
+		case WM_XBUTTONDOWN:
+			event.Type = "mouse_btn"
+			// XButton is in the high-order word of MouseData
+			xButton := (hookStruct.MouseData >> 16) & 0xFFFF
+			if xButton == XBUTTON1 {
+				event.Button = 4
+			} else if xButton == XBUTTON2 {
+				event.Button = 5
+			}
+			event.Pressed = true
+		case WM_XBUTTONUP:
+			event.Type = "mouse_btn"
+			xButton := (hookStruct.MouseData >> 16) & 0xFFFF
+			if xButton == XBUTTON1 {
+				event.Button = 4
+			} else if xButton == XBUTTON2 {
+				event.Button = 5
+			}
 			event.Pressed = false
 		}
 

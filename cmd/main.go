@@ -249,7 +249,7 @@ func runService(cfgMgr *config.Manager) {
 		wsClient = network.NewWSClient(cfg.General.CoordinatorAddr, cfg.General.APIToken)
 
 		// Set up event handler for received input events
-		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
+		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64) {
 			// Check if injection is allowed
 			injectionMutex.Lock()
 			shouldInject := allowInjection
@@ -266,6 +266,10 @@ func runService(cfgMgr *config.Manager) {
 				injector.InjectMouseMove(deltaX, deltaY)
 			case "mouse_btn":
 				injector.InjectMouseButton(button, pressed)
+			case "mouse_wheel":
+				injector.InjectMouseWheel(wheelDelta, 0)
+			case "mouse_wheel_h":
+				injector.InjectMouseWheel(0, wheelDelta)
 			case "key":
 				injector.InjectKey(keyCode, pressed, modifiers)
 			}
@@ -589,7 +593,7 @@ func runWindowsInputTest(cfgMgr *config.Manager) {
 		wsClient = network.NewWSClient(cfg.General.CoordinatorAddr, cfg.General.APIToken)
 
 		// Set up event handler for received input events
-		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
+		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64) {
 			// TODO: Inject input on Windows agent
 			// For now, just log the received events
 		}
@@ -617,9 +621,9 @@ func runWindowsInputTest(cfgMgr *config.Manager) {
 	log.Println("Waiting for input events...")
 	for event := range trap.Events() {
 		eventCount++
-		log.Printf("Event #%d: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X)",
+		log.Printf("Event #%d: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X, wheel:%d)",
 			eventCount, event.Type, event.DeltaX, event.DeltaY,
-			event.Button, event.Pressed, event.KeyCode)
+			event.Button, event.Pressed, event.KeyCode, event.WheelDelta)
 
 		// Send to remote if WebSocket is connected
 		if wsClient != nil && wsClient.IsConnected() {
@@ -629,6 +633,7 @@ func runWindowsInputTest(cfgMgr *config.Manager) {
 				event.DeltaX, event.DeltaY,
 				event.Button, event.Pressed,
 				event.KeyCode, event.Modifiers,
+				event.WheelDelta,
 				event.Timestamp,
 			)
 		} else if wsClient != nil {
@@ -652,9 +657,9 @@ func runMacInputTest(cfgMgr *config.Manager) {
 		wsClient = network.NewWSClient(cfg.General.CoordinatorAddr, cfg.General.APIToken)
 
 		// Set up event handler
-		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
-			log.Printf("Received input: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X)",
-				eventType, deltaX, deltaY, button, pressed, keyCode)
+		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64) {
+			log.Printf("Received input: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X, wheel:%d)",
+				eventType, deltaX, deltaY, button, pressed, keyCode, wheelDelta)
 
 			switch eventType {
 			case "mouse_move":
@@ -664,6 +669,14 @@ func runMacInputTest(cfgMgr *config.Manager) {
 			case "mouse_btn":
 				if err := injector.InjectMouseButton(button, pressed); err != nil {
 					log.Printf("Failed to inject mouse button: %v", err)
+				}
+			case "mouse_wheel":
+				if err := injector.InjectMouseWheel(wheelDelta, 0); err != nil {
+					log.Printf("Failed to inject mouse wheel: %v", err)
+				}
+			case "mouse_wheel_h":
+				if err := injector.InjectMouseWheel(0, wheelDelta); err != nil {
+					log.Printf("Failed to inject horizontal mouse wheel: %v", err)
 				}
 			case "key":
 				if err := injector.InjectKey(keyCode, pressed, modifiers); err != nil {

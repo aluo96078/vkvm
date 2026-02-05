@@ -50,7 +50,7 @@ void injectMouseMoveRelative(CGFloat dx, CGFloat dy) {
     // Determine event type based on button state (drag vs move)
     CGEventType eventType;
     CGMouseButton button = kCGMouseButtonLeft;
-    
+
     if (g_leftButtonDown) {
         eventType = kCGEventLeftMouseDragged;
         button = kCGMouseButtonLeft;
@@ -84,6 +84,8 @@ void injectMouseButton(int button, bool pressed) {
         case 1: cgButton = kCGMouseButtonLeft; break;
         case 2: cgButton = kCGMouseButtonRight; break;
         case 3: cgButton = kCGMouseButtonCenter; break;
+        case 4: cgButton = 3; break;  // XButton1 -> Button 3 (extra button)
+        case 5: cgButton = 4; break;  // XButton2 -> Button 4 (extra button)
         default: return;
     }
 
@@ -91,14 +93,18 @@ void injectMouseButton(int button, bool pressed) {
         switch (button) {
             case 1: eventType = kCGEventLeftMouseDown; break;
             case 2: eventType = kCGEventRightMouseDown; break;
-            case 3: eventType = kCGEventOtherMouseDown; break;
+            case 3:
+            case 4:
+            case 5: eventType = kCGEventOtherMouseDown; break;
             default: return;
         }
     } else {
         switch (button) {
             case 1: eventType = kCGEventLeftMouseUp; break;
             case 2: eventType = kCGEventRightMouseUp; break;
-            case 3: eventType = kCGEventOtherMouseUp; break;
+            case 3:
+            case 4:
+            case 5: eventType = kCGEventOtherMouseUp; break;
             default: return;
         }
     }
@@ -110,29 +116,61 @@ void injectMouseButton(int button, bool pressed) {
 
     // Get current mouse position for button events
     CGPoint currentPos = getCurrentMousePosition();
-    
+
     // Handle click count for double-click detection
     int clickCount = 1;
     if (pressed && button == 1) {
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         CGFloat distance = sqrt(pow(currentPos.x - g_lastClickPos.x, 2) + pow(currentPos.y - g_lastClickPos.y, 2));
-        
+
         // Double-click threshold: 300ms and within 5 pixels
         if ((now - g_lastClickTime) < 0.3 && distance < 5.0) {
             g_clickCount++;
         } else {
             g_clickCount = 1;
         }
-        
+
         clickCount = g_clickCount;
         g_lastClickTime = now;
         g_lastClickPos = currentPos;
     }
-    
+
     CGEventRef event = CGEventCreateMouseEvent(NULL, eventType, currentPos, cgButton);
     if (event) {
         // Set click count for proper double-click/triple-click recognition
         CGEventSetIntegerValueField(event, kCGMouseEventClickState, clickCount);
+        // Set button number for XButton events
+        if (button >= 3) {
+            CGEventSetIntegerValueField(event, kCGMouseEventButtonNumber, cgButton);
+        }
+        CGEventPost(kCGSessionEventTap, event);
+        CFRelease(event);
+    }
+}
+
+// Scroll wheel injection: vertical and horizontal
+void injectMouseWheel(int deltaY, int deltaX) {
+    // CGEventCreateScrollWheelEvent uses scroll units (typically lines)
+    // Windows WHEEL_DELTA is 120 for one notch, so we normalize
+    int32_t scrollDeltaY = deltaY / 120;  // Convert to scroll lines
+    int32_t scrollDeltaX = deltaX / 120;
+
+    // If delta is less than one unit but non-zero, still scroll at least one unit
+    if (deltaY != 0 && scrollDeltaY == 0) {
+        scrollDeltaY = deltaY > 0 ? 1 : -1;
+    }
+    if (deltaX != 0 && scrollDeltaX == 0) {
+        scrollDeltaX = deltaX > 0 ? 1 : -1;
+    }
+
+    CGEventRef event = CGEventCreateScrollWheelEvent(
+        NULL,
+        kCGScrollEventUnitLine,
+        2,  // wheel count: 2 for both vertical and horizontal
+        scrollDeltaY,
+        scrollDeltaX
+    );
+    if (event) {
         CGEventPost(kCGSessionEventTap, event);
         CFRelease(event);
     }
@@ -142,7 +180,7 @@ void injectKey(CGKeyCode keyCode, bool pressed, uint16 modifiers) {
     // Check if this is a modifier key
     bool isModifierKey = false;
     CGEventFlags modifierFlag = 0;
-    
+
     switch (keyCode) {
         case 0x38: // Left Shift
         case 0x3C: // Right Shift
@@ -165,21 +203,21 @@ void injectKey(CGKeyCode keyCode, bool pressed, uint16 modifiers) {
             modifierFlag = kCGEventFlagMaskCommand;
             break;
     }
-    
+
     if (isModifierKey) {
         // For modifier keys, use kCGEventFlagsChanged
         CGEventRef event = CGEventCreate(NULL);
         if (event) {
             CGEventFlags currentFlags = CGEventGetFlags(event);
             CFRelease(event);
-            
+
             CGEventFlags newFlags;
             if (pressed) {
                 newFlags = currentFlags | modifierFlag;
             } else {
                 newFlags = currentFlags & ~modifierFlag;
             }
-            
+
             // Create a flags changed event
             CGEventRef flagsEvent = CGEventCreateKeyboardEvent(NULL, keyCode, pressed);
             if (flagsEvent) {
@@ -383,7 +421,7 @@ func (i *Injector) InjectMouseMove(dx, dy int) error {
 
 // InjectMouseButton injects a mouse button event
 func (i *Injector) InjectMouseButton(button int, pressed bool) error {
-	if button < 1 || button > 3 {
+	if button < 1 || button > 5 {
 		return fmt.Errorf("invalid button number: %d", button)
 	}
 
@@ -395,6 +433,14 @@ func (i *Injector) InjectMouseButton(button int, pressed bool) error {
 	}
 
 	C.injectMouseButton(C.int(button), cPressed)
+	return nil
+}
+
+// InjectMouseWheel injects a mouse scroll wheel event
+// deltaY: positive=up, negative=down (vertical scroll)
+// deltaX: positive=right, negative=left (horizontal scroll)
+func (i *Injector) InjectMouseWheel(deltaY, deltaX int) error {
+	C.injectMouseWheel(C.int(deltaY), C.int(deltaX))
 	return nil
 }
 

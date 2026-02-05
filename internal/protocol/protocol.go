@@ -50,12 +50,13 @@ type SyncResponsePayload struct {
 
 // InputPayload is the payload for TypeInput
 type InputPayload struct {
-	Type      string `json:"type"` // "mouse_move", "mouse_btn", "key"
-	DeltaX    int    `json:"dx,omitempty"`
-	DeltaY    int    `json:"dy,omitempty"`
-	Button    int    `json:"btn,omitempty"` // 1=left, 2=right, 3=middle
-	Pressed   bool   `json:"pressed,omitempty"`
-	KeyCode   uint16 `json:"keycode,omitempty"`
-	Modifiers uint16 `json:"modifiers,omitempty"`
-	Timestamp int64  `json:"ts"` // Unix ms timestamp
+	Type       string `json:"type"` // "mouse_move", "mouse_btn", "mouse_wheel", "key"
+	DeltaX     int    `json:"dx,omitempty"`
+	DeltaY     int    `json:"dy,omitempty"`
+	Button     int    `json:"btn,omitempty"` // 1=left, 2=right, 3=middle, 4=xbutton1, 5=xbutton2
+	Pressed    bool   `json:"pressed,omitempty"`
+	KeyCode    uint16 `json:"keycode,omitempty"`
+	Modifiers  uint16 `json:"modifiers,omitempty"`
+	WheelDelta int    `json:"wheel_delta,omitempty"` // Positive=up/right, Negative=down/left
+	Timestamp  int64  `json:"ts"`                    // Unix ms timestamp
 }
