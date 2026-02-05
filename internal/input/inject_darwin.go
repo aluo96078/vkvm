@@ -2,6 +2,11 @@
 
 package input
 
+import (
+	"fmt"
+	"log"
+)
+
 /*
 #cgo CFLAGS: -x objective-c
 #cgo LDFLAGS: -framework CoreGraphics -framework CoreFoundation -framework ApplicationServices
@@ -20,25 +25,17 @@ CGPoint getCurrentMousePosition() {
     CGEventRef event = CGEventCreate(NULL);
     CGPoint cursor = CGEventGetLocation(event);
     CFRelease(event);
-    return cursor;vu04y94
-    vmpcl5jbj
-    5/t;xk
-    <u6tj6
-    vu;ej0
-    logu3wu6elvu/s/
+    return cursor;
 }
 
 // Helper functions - inject mouse move with relative delta
 void injectMouseMove(CGFloat dx, CGFloat dy) {
     // Get current mouse position
     CGPoint currentPos = getCurrentMousePosition();
-    
+
     // Calculate new position
-    CGPoint newPo
-    
-    
-    s = CGPointMake(currentPos.x + dx, currentPos.y + dy);
-    
+    CGPoint newPos = CGPointMake(currentPos.x + dx, currentPos.y + dy);
+
     // Create mouse moved event at the new position
     CGEventRef event = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, newPos, kCGMouseButtonLeft);
     CGEventPost(kCGSessionEventTap, event);
@@ -79,17 +76,23 @@ void injectMouseButton(int button, bool pressed) {
     CFRelease(event);
 }
 
-void injectKey(CGKeyCode keyCode, bool pressed) {
+void injectKey(CGKeyCode keyCode, bool pressed, uint16 modifiers) {
     CGEventType eventType = pressed ? kCGEventKeyDown : kCGEventKeyUp;
     CGEventRef event = CGEventCreateKeyboardEvent(NULL, keyCode, pressed);
+
+    // Set modifier flags
+    CGEventFlags flags = 0;
+    if (modifiers & 0x0001) flags |= kCGEventFlagMaskShift;     // Shift
+    if (modifiers & 0x0002) flags |= kCGEventFlagMaskControl;   // Ctrl
+    if (modifiers & 0x0004) flags |= kCGEventFlagMaskAlternate; // Alt
+    if (modifiers & 0x0008) flags |= kCGEventFlagMaskCommand;   // Cmd
+
+    CGEventSetFlags(event, flags);
     CGEventPost(kCGSessionEventTap, event);
     CFRelease(event);
 }
 */
 import "C"
-import (
-	"fmt"
-)
 
 // macOS implementation of input injection using CoreGraphics
 
@@ -150,6 +153,14 @@ var windowsToMacKeyMap = map[uint16]uint16{
 	0x79: 0x6D, // F10
 	0x7A: 0x67, // F11
 	0x7B: 0x6F, // F12
+	0x7C: 0x69, // F13
+	0x7D: 0x6B, // F14
+	0x7E: 0x71, // F15
+	0x7F: 0x6A, // F16
+	0x80: 0x40, // F17
+	0x81: 0x4F, // F18
+	0x82: 0x50, // F19
+	0x83: 0x5A, // F20
 
 	// Special keys
 	0x08: 0x33, // Backspace -> Delete
@@ -158,9 +169,27 @@ var windowsToMacKeyMap = map[uint16]uint16{
 	0x10: 0x38, // Shift (left)
 	0x11: 0x3B, // Control (left)
 	0x12: 0x3A, // Alt -> Option
+	0x13: 0x48, // Pause -> Pause
 	0x14: 0x39, // Caps Lock
 	0x1B: 0x35, // Escape
 	0x20: 0x31, // Space
+	0x2C: 0x5D, // Print Screen -> Print Screen
+	0x2D: 0x72, // Insert -> Insert (Help key on some keyboards)
+	0x2E: 0x75, // Delete -> Forward Delete
+	0x5D: 0x2F, // Apps -> Context Menu (right click menu)
+	0x90: 0x47, // Num Lock
+	0x91: 0x57, // Scroll Lock
+
+	// Media keys (extended VK codes)
+	0xAD: 0x49, // Volume Mute
+	0xAE: 0x4A, // Volume Down
+	0xAF: 0x48, // Volume Up
+	0xB0: 0x34, // Next Track
+	0xB1: 0x31, // Previous Track
+	0xB2: 0x42, // Stop
+	0xB3: 0x43, // Play/Pause
+	0xB4: 0x5E, // Start Mail
+	0xB5: 0x5C, // Select Media
 
 	// Arrow keys
 	0x25: 0x7B, // Left Arrow
@@ -173,9 +202,6 @@ var windowsToMacKeyMap = map[uint16]uint16{
 	0x22: 0x79, // Page Down
 	0x23: 0x77, // End
 	0x24: 0x73, // Home
-	0x2D: 0x72, // Insert -> Help
-	0x2E: 0x75, // Delete -> Forward Delete
-
 	// Modifier keys
 	0x5B: 0x37, // Left Windows -> Left Command
 	0x5C: 0x36, // Right Windows -> Right Command
@@ -218,7 +244,9 @@ var windowsToMacKeyMap = map[uint16]uint16{
 }
 
 // Injector represents a macOS input injector
-type Injector struct{}
+type Injector struct {
+	modifierState uint16 // Track current modifier state
+}
 
 // NewInjector creates a new input injector for macOS
 func NewInjector() *Injector {
@@ -248,21 +276,58 @@ func (i *Injector) InjectMouseButton(button int, pressed bool) error {
 	return nil
 }
 
-// InjectKey injects a keyboard event with Windows VK code to macOS key code conversion
+// InjectKey injects a keyboard event
 func (i *Injector) InjectKey(keyCode uint16, pressed bool, modifiers uint16) error {
-	// Convert Windows VK code to macOS CGKeyCode
 	macKeyCode, ok := windowsToMacKeyMap[keyCode]
 	if !ok {
-		macKeyCode = keyCode // Fallback: pass through (likely won't work correctly)
+		log.Printf("Warning: unmapped key code 0x%X", keyCode)
+		return fmt.Errorf("unmapped key code: 0x%X", keyCode)
 	}
 
-	var cPressed C.bool
-	if pressed {
-		cPressed = C.bool(true)
-	} else {
-		cPressed = C.bool(false)
+	// Update local modifier state
+	switch keyCode {
+	case 0x10, 0xA0, 0xA1: // Shift keys
+		if pressed {
+			i.modifierState |= 0x01
+		} else {
+			i.modifierState &^= 0x01
+		}
+	case 0x11, 0xA2, 0xA3: // Control keys
+		if pressed {
+			i.modifierState |= 0x02
+		} else {
+			i.modifierState &^= 0x02
+		}
+	case 0x12, 0xA4, 0xA5: // Alt keys
+		if pressed {
+			i.modifierState |= 0x04
+		} else {
+			i.modifierState &^= 0x04
+		}
+	case 0x5B, 0x5C: // Windows/Command keys
+		if pressed {
+			i.modifierState |= 0x08
+		} else {
+			i.modifierState &^= 0x08
+		}
 	}
 
-	C.injectKey(C.CGKeyCode(macKeyCode), cPressed)
+	// Use the C function for injection with local modifier state
+	C.injectKey(C.CGKeyCode(macKeyCode), C.bool(pressed), C.uint16(i.modifierState))
 	return nil
+}
+
+// TestKeyMapping tests if a Windows key code can be mapped to macOS
+func TestKeyMapping(windowsKeyCode uint16) (uint16, bool) {
+	macKeyCode, ok := windowsToMacKeyMap[windowsKeyCode]
+	return macKeyCode, ok
+}
+
+// GetMappedKeys returns a list of all mapped Windows key codes for testing
+func GetMappedKeys() []uint16 {
+	keys := make([]uint16, 0, len(windowsToMacKeyMap))
+	for k := range windowsToMacKeyMap {
+		keys = append(keys, k)
+	}
+	return keys
 }

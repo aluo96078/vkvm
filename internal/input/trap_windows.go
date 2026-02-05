@@ -43,6 +43,14 @@ const (
 	MOD_CONTROL            = 0x0002
 	MOD_ALT                = 0x0001
 	VK_ESCAPE              = 0x1B
+	VK_LSHIFT              = 0xA0
+	VK_RSHIFT              = 0xA1
+	VK_LCONTROL            = 0xA2
+	VK_RCONTROL            = 0xA3
+	VK_LMENU               = 0xA4
+	VK_RMENU               = 0xA5
+	VK_LWIN                = 0x5B
+	VK_RWIN                = 0x5C
 	IDI_APPLICATION        = 32512
 	IDC_ARROW              = 32512
 	WS_EX_TRANSPARENT      = 0x00000020
@@ -95,6 +103,7 @@ var (
 	SetWindowsHookEx           = user32.NewProc("SetWindowsHookExW")
 	UnhookWindowsHookEx        = user32.NewProc("UnhookWindowsHookEx")
 	CallNextHookEx             = user32.NewProc("CallNextHookEx")
+	GetKeyState                = user32.NewProc("GetKeyState")
 	GetClientRect              = user32.NewProc("GetClientRect")
 	PostQuitMessage            = user32.NewProc("PostQuitMessage")
 	SystemParametersInfo       = user32.NewProc("SystemParametersInfoW")
@@ -210,14 +219,9 @@ func (t *Trap) Start() error {
 		return fmt.Errorf("trap already running")
 	}
 
-	// Create window for raw input
+	// Create window for hotkey registration
 	if err := t.createWindow(); err != nil {
 		return fmt.Errorf("failed to create window: %w", err)
-	}
-
-	// Register for raw input
-	if err := t.registerRawInput(); err != nil {
-		return fmt.Errorf("failed to register raw input: %w", err)
 	}
 
 	// Register kill switch hotkey (Ctrl+Alt+Esc)
@@ -225,7 +229,7 @@ func (t *Trap) Start() error {
 		return fmt.Errorf("failed to register kill switch: %w", err)
 	}
 
-	// Install low-level hooks for input blocking
+	// Install low-level hooks for input capture and blocking
 	if err := t.installHooks(); err != nil {
 		return fmt.Errorf("failed to install hooks: %w", err)
 	}
@@ -476,20 +480,10 @@ func (t *Trap) installHooks() error {
 	return nil
 }
 
-// setupCursorClipping sets up cursor clipping for infinite scrolling
-func (t *Trap) setupCursorClipping() error {
-	var rect RECT
-	rect.Left = -100
-	rect.Top = -100
-	rect.Right = -99
-	rect.Bottom = -99
-
-	ret, _, err := ClipCursor.Call(uintptr(unsafe.Pointer(&rect)))
-	if ret == 0 {
-		return fmt.Errorf("ClipCursor failed: %v", err)
-	}
-
-	return nil
+// getKeyState gets the state of a virtual key
+func getKeyState(vk uint32) int16 {
+	ret, _, _ := GetKeyState.Call(uintptr(vk))
+	return int16(ret)
 }
 
 // windowProc handles window messages
@@ -811,9 +805,25 @@ func (t *Trap) keyboardHookProc(nCode int32, wParam uintptr, lParam uintptr) uin
 		hookStruct := (*KBDLLHOOKSTRUCT)(unsafe.Pointer(lParam))
 		msg := uint32(wParam)
 
+		// Get current modifier states
+		var modifiers uint16
+		if getKeyState(VK_LSHIFT) < 0 || getKeyState(VK_RSHIFT) < 0 {
+			modifiers |= 0x0001 // Shift
+		}
+		if getKeyState(VK_LCONTROL) < 0 || getKeyState(VK_RCONTROL) < 0 {
+			modifiers |= 0x0002 // Ctrl
+		}
+		if getKeyState(VK_LMENU) < 0 || getKeyState(VK_RMENU) < 0 {
+			modifiers |= 0x0004 // Alt
+		}
+		if getKeyState(VK_LWIN) < 0 || getKeyState(VK_RWIN) < 0 {
+			modifiers |= 0x0008 // Meta/Cmd
+		}
+
 		event := InputEvent{
 			Type:      "key",
 			KeyCode:   uint16(hookStruct.VkCode),
+			Modifiers: modifiers,
 			Timestamp: time.Now().UnixMilli(),
 		}
 
@@ -822,8 +832,6 @@ func (t *Trap) keyboardHookProc(nCode int32, wParam uintptr, lParam uintptr) uin
 		} else if msg == 0x0101 { // WM_KEYUP
 			event.Pressed = false
 		}
-
-		// Don't log anything to avoid blocking
 
 		select {
 		case t.events <- event:
@@ -839,7 +847,6 @@ func (t *Trap) keyboardHookProc(nCode int32, wParam uintptr, lParam uintptr) uin
 
 		if captureEnabled {
 			// Return 1 to block input
-			// Note: RegisterHotKey hotkeys work at a lower level and will still function
 			return 1
 		}
 	}

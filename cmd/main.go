@@ -257,7 +257,6 @@ func runService(cfgMgr *config.Manager) {
 
 			if !shouldInject {
 				// Silently ignore input when not displaying this agent
-				log.Printf("Agent: Injection blocked - not active profile")
 				return
 			}
 
