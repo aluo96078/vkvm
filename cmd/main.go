@@ -330,6 +330,7 @@ func runService(cfgMgr *config.Manager) {
 							event.DeltaX, event.DeltaY,
 							event.Button, event.Pressed,
 							event.KeyCode, event.Modifiers,
+							event.WheelDelta,
 							event.Timestamp,
 						)
 					}

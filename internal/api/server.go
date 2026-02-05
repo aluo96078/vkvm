@@ -32,8 +32,8 @@ func NewServer(configMgr *config.Manager, sw *switcher.Switcher) *Server {
 }
 
 // BroadcastInput broadcasts input events to all connected agents
-func (s *Server) BroadcastInput(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
-	s.wsMgr.BroadcastInput(eventType, deltaX, deltaY, button, pressed, keyCode, modifiers, timestamp)
+func (s *Server) BroadcastInput(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64) {
+	s.wsMgr.BroadcastInput(eventType, deltaX, deltaY, button, pressed, keyCode, modifiers, wheelDelta, timestamp)
 }
 
 // Start starts the API server on the specified port
