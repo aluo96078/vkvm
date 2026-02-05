@@ -192,6 +192,49 @@ func runService(cfgMgr *config.Manager) {
 		log.Printf("Warning: Hotkey Engine failed to start: %v", err)
 	}
 
+	// Input capture for agent mode
+	var inputTrap *input.Trap
+	if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" {
+		log.Printf("Starting input capture for agent mode")
+		inputTrap = input.NewTrap()
+
+		// Set up WebSocket client for agent
+		wsClient := network.NewWSClient(cfg.General.CoordinatorAddr, cfg.General.APIToken)
+
+		// Set up event handler for received input events
+		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
+			log.Printf("[AGENT] Received input event: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X, modifiers:0x%X)",
+				eventType, deltaX, deltaY, button, pressed, keyCode, modifiers)
+
+			// TODO: Inject input on Windows agent
+		}
+
+		wsClient.Start()
+
+		// Start input capture
+		if err := inputTrap.Start(); err != nil {
+			log.Printf("Failed to start input capture: %v", err)
+		} else {
+			log.Printf("Input capture started for agent mode")
+
+			// Process captured events
+			go func() {
+				for event := range inputTrap.Events() {
+					if wsClient.IsConnected() {
+						log.Printf("[AGENT] Sending event: %s", event.Type)
+						wsClient.SendInputEvent(
+							event.Type,
+							event.DeltaX, event.DeltaY,
+							event.Button, event.Pressed,
+							event.KeyCode, event.Modifiers,
+							event.Timestamp,
+						)
+					}
+				}
+			}()
+		}
+	}
+
 	// Tray instance
 	t := tray.New("VKVM - KVM Switcher")
 
@@ -422,6 +465,16 @@ func runWindowsInputTest(cfgMgr *config.Manager) {
 	if cfg.General.CoordinatorAddr != "" {
 		log.Printf("Connecting to coordinator: %s", cfg.General.CoordinatorAddr)
 		wsClient = network.NewWSClient(cfg.General.CoordinatorAddr, cfg.General.APIToken)
+
+		// Set up event handler for received input events
+		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
+			log.Printf("[AGENT] Received input event: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X, modifiers:0x%X)",
+				eventType, deltaX, deltaY, button, pressed, keyCode, modifiers)
+
+			// TODO: Inject input on Windows agent
+			// For now, just log the received events
+		}
+
 		wsClient.Start()
 		defer wsClient.Close()
 	}
@@ -432,6 +485,13 @@ func runWindowsInputTest(cfgMgr *config.Manager) {
 		log.Fatalf("Failed to start input capture: %v", err)
 	}
 	log.Println("Input capture started successfully")
+
+	// Safety mechanism: auto-stop after 3 minutes
+	go func() {
+		time.Sleep(3 * time.Minute)
+		log.Println("Safety timeout reached - automatically stopping input capture")
+		trap.Stop()
+	}()
 
 	// Process events
 	eventCount := 0
