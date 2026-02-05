@@ -457,7 +457,6 @@ func (i *Injector) InjectMouseButton(button int, pressed bool) error {
 // deltaY: positive=up, negative=down (vertical scroll)
 // deltaX: positive=right, negative=left (horizontal scroll)
 func (i *Injector) InjectMouseWheel(deltaY, deltaX int) error {
-	log.Printf("InjectMouseWheel called: deltaY=%d, deltaX=%d", deltaY, deltaX)
 	C.injectMouseWheel(C.int(deltaY), C.int(deltaX))
 	return nil
 }

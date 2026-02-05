@@ -520,6 +520,10 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             <!-- Host-specific settings -->
             <div id="host-settings" style="display: none; margin-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 0.75rem;">
                 <div class="input-group" style="flex-direction: row; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+                    <input type="checkbox" id="usb-forwarding-enabled" onchange="updateGeneralConfig()">
+                    <label style="margin: 0; cursor: pointer;">Enable USB Input Forwarding (Keyboard/Mouse)</label>
+                </div>
+                <div class="input-group" style="flex-direction: row; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
                     <input type="checkbox" id="input-capture-enabled" onchange="updateGeneralConfig()">
                     <label style="margin: 0; cursor: pointer;">Enable Input Capture Mode (Block local keyboard/mouse)</label>
                 </div>
@@ -650,6 +654,7 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             document.getElementById('role').value = config.general.role || 'host';
             document.getElementById('coordinator-addr').value = config.general.coordinator_addr || '';
             document.getElementById('agent-profile').value = config.general.agent_profile || '';
+            document.getElementById('usb-forwarding-enabled').checked = config.general.usb_forwarding_enabled !== false; // Default to true
             document.getElementById('input-capture-enabled').checked = config.general.input_capture_enabled || false;
             document.getElementById('escape-hotkey').value = config.general.escape_hotkey || 'Ctrl+Alt+Shift+Esc';
             
@@ -676,6 +681,7 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             config.general.role = document.getElementById('role').value;
             config.general.coordinator_addr = document.getElementById('coordinator-addr').value;
             config.general.agent_profile = document.getElementById('agent-profile').value;
+            config.general.usb_forwarding_enabled = document.getElementById('usb-forwarding-enabled').checked;
             config.general.input_capture_enabled = document.getElementById('input-capture-enabled').checked;
             config.general.escape_hotkey = document.getElementById('escape-hotkey').value;
         }

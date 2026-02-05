@@ -110,6 +110,9 @@ type GeneralConfig struct {
 	// InputCaptureEnabled enables complete input capture mode on Host (prevents local system from receiving input)
 	InputCaptureEnabled bool `json:"input_capture_enabled,omitempty"`
 
+	// USBForwardingEnabled enables USB input forwarding (keyboard/mouse capture and injection)
+	USBForwardingEnabled bool `json:"usb_forwarding_enabled,omitempty"`
+
 	// EscapeHotkey is the emergency hotkey to disable input capture (e.g. "Ctrl+Alt+Shift+Esc")
 	EscapeHotkey string `json:"escape_hotkey,omitempty"`
 }
@@ -131,16 +134,17 @@ func DefaultConfig() *Config {
 		},
 		Monitors: []MonitorInfo{},
 		General: GeneralConfig{
-			StartOnBoot:         false,
-			StartMinimized:      true,
-			ShowNotifications:   true,
-			CurrentProfile:      "PC1",
-			APIEnabled:          true, // Ensure API is on by default for remote usage
-			APIPort:             18080,
-			Role:                "host",
-			SettingsHotkey:      "Ctrl+Alt+S",
-			InputCaptureEnabled: false,
-			EscapeHotkey:        "Ctrl+Alt+Shift+Esc",
+			StartOnBoot:          false,
+			StartMinimized:       true,
+			ShowNotifications:    true,
+			CurrentProfile:       "PC1",
+			APIEnabled:           true, // Ensure API is on by default for remote usage
+			APIPort:              18080,
+			Role:                 "host",
+			SettingsHotkey:       "Ctrl+Alt+S",
+			InputCaptureEnabled:  false,
+			USBForwardingEnabled: true, // Enable USB forwarding by default
+			EscapeHotkey:         "Ctrl+Alt+Shift+Esc",
 		},
 	}
 }

@@ -207,7 +207,7 @@ func runService(cfgMgr *config.Manager) {
 	}
 
 	// Input handling based on role
-	if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" {
+	if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" && cfg.General.USBForwardingEnabled {
 		// Create input injector
 		injector := input.NewInjector()
 
@@ -290,6 +290,8 @@ func runService(cfgMgr *config.Manager) {
 		}
 
 		wsClient.Start()
+	} else if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" && !cfg.General.USBForwardingEnabled {
+		log.Printf("Agent mode: USB forwarding disabled, skipping input injection setup")
 	} else if cfg.General.Role == "host" {
 		// Check administrator privileges on Windows
 		if runtime.GOOS == "windows" {
@@ -297,45 +299,49 @@ func runService(cfgMgr *config.Manager) {
 			log.Println("Please ensure you're running this application as Administrator")
 		}
 
-		// Start input capture on host
-		inputTrap = input.NewTrap()
+		// Start input capture on host (only if USB forwarding is enabled)
+		if cfg.General.USBForwardingEnabled {
+			inputTrap = input.NewTrap()
 
-		log.Printf("Host mode: AgentProfile='%s'", cfg.General.AgentProfile)
+			log.Printf("Host mode: AgentProfile='%s'", cfg.General.AgentProfile)
 
-		// Initial capture state: check current profile
-		if cfg.General.AgentProfile != "" {
-			detectedProfile, err := sw.DetectActiveProfile()
-			if err == nil && detectedProfile == cfg.General.AgentProfile {
-				log.Printf("Initial profile '%s' matches agent profile, enabling capture", detectedProfile)
+			// Initial capture state: check current profile
+			if cfg.General.AgentProfile != "" {
+				detectedProfile, err := sw.DetectActiveProfile()
+				if err == nil && detectedProfile == cfg.General.AgentProfile {
+					log.Printf("Initial profile '%s' matches agent profile, enabling capture", detectedProfile)
+					inputTrap.EnableCapture(true)
+				} else {
+					log.Printf("Initial profile '%s' does not match agent profile '%s', capture disabled", detectedProfile, cfg.General.AgentProfile)
+				}
+			} else if cfg.General.InputCaptureEnabled {
+				// Fallback to config if no agent profile set
+				log.Printf("No agent profile set, using config InputCaptureEnabled: %v", cfg.General.InputCaptureEnabled)
 				inputTrap.EnableCapture(true)
 			} else {
-				log.Printf("Initial profile '%s' does not match agent profile '%s', capture disabled", detectedProfile, cfg.General.AgentProfile)
+				log.Printf("Input capture not enabled")
 			}
-		} else if cfg.General.InputCaptureEnabled {
-			// Fallback to config if no agent profile set
-			log.Printf("No agent profile set, using config InputCaptureEnabled: %v", cfg.General.InputCaptureEnabled)
-			inputTrap.EnableCapture(true)
-		} else {
-			log.Printf("Input capture not enabled")
-		}
 
-		if err := inputTrap.Start(); err == nil {
-			// Process captured events and broadcast to all connected agents
-			go func() {
-				for event := range inputTrap.Events() {
-					// Broadcast input event to all connected agents via API server
-					if apiServer != nil {
-						apiServer.BroadcastInput(
-							event.Type,
-							event.DeltaX, event.DeltaY,
-							event.Button, event.Pressed,
-							event.KeyCode, event.Modifiers,
-							event.WheelDelta,
-							event.Timestamp,
-						)
+			if err := inputTrap.Start(); err == nil {
+				// Process captured events and broadcast to all connected agents
+				go func() {
+					for event := range inputTrap.Events() {
+						// Broadcast input event to all connected agents via API server
+						if apiServer != nil {
+							apiServer.BroadcastInput(
+								event.Type,
+								event.DeltaX, event.DeltaY,
+								event.Button, event.Pressed,
+								event.KeyCode, event.Modifiers,
+								event.WheelDelta,
+								event.Timestamp,
+							)
+						}
 					}
-				}
-			}()
+				}()
+			}
+		} else {
+			log.Printf("USB forwarding disabled, skipping input capture")
 		}
 	}
 
