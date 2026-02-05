@@ -523,6 +523,9 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                     <input type="checkbox" id="usb-forwarding-enabled" onchange="updateGeneralConfig()">
                     <label style="margin: 0; cursor: pointer;">Enable USB Input Forwarding (Keyboard/Mouse)</label>
                 </div>
+                <small style="color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem; display: block;">
+                    This setting is synced to all connected Agents
+                </small>
                 <div class="input-group" style="flex-direction: row; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
                     <input type="checkbox" id="input-capture-enabled" onchange="updateGeneralConfig()">
                     <label style="margin: 0; cursor: pointer;">Enable Input Capture Mode (Block local keyboard/mouse)</label>

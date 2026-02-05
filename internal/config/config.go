@@ -377,3 +377,11 @@ func (m *Manager) UpdateProfilesFromRemote(profiles interface{}) error {
 
 	return m.Save()
 }
+
+// UpdateUSBForwardingFromHost updates the USB forwarding setting from Host
+func (m *Manager) UpdateUSBForwardingFromHost(enabled bool) {
+	m.mu.Lock()
+	m.config.General.USBForwardingEnabled = enabled
+	m.mu.Unlock()
+	log.Printf("Config: Updated USB forwarding from Host: %v", enabled)
+}

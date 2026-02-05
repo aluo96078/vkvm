@@ -51,12 +51,14 @@ func New(configMgr *config.Manager) (*Switcher, error) {
 			}
 		}
 
-		s.wsClient.OnSync = func(profiles interface{}) {
+		s.wsClient.OnSync = func(profiles interface{}, usbForwardingEnabled bool) {
 			if err := s.configMgr.UpdateProfilesFromRemote(profiles); err != nil {
 				log.Printf("Switcher: Config sync failed: %v", err)
 			} else {
-				log.Printf("Switcher: Config synced from Host")
+				log.Printf("Switcher: Config synced from Host (USB forwarding: %v)", usbForwardingEnabled)
 			}
+			// Update USB forwarding setting from Host
+			s.configMgr.UpdateUSBForwardingFromHost(usbForwardingEnabled)
 		}
 
 		// Start client

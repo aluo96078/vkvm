@@ -45,7 +45,8 @@ type SwitchPayload struct {
 
 // SyncResponsePayload is the payload for TypeSyncResponse
 type SyncResponsePayload struct {
-	Profiles interface{} `json:"profiles"` // Using interface{} to avoid circular dependency with config package if possible, or we will move this to a shared location
+	Profiles             interface{} `json:"profiles"` // Using interface{} to avoid circular dependency with config package if possible, or we will move this to a shared location
+	USBForwardingEnabled bool        `json:"usb_forwarding_enabled"`
 }
 
 // InputPayload is the payload for TypeInput

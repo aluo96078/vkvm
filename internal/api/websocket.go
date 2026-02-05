@@ -227,7 +227,8 @@ func (c *WebSocketClient) handleMessage(data []byte) {
 		resp := protocol.Message{
 			Type: protocol.TypeSyncResponse,
 			Payload: protocol.SyncResponsePayload{
-				Profiles: cfg.Profiles,
+				Profiles:             cfg.Profiles,
+				USBForwardingEnabled: cfg.General.USBForwardingEnabled,
 			},
 		}
 

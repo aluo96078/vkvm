@@ -23,7 +23,7 @@ type WSClient struct {
 
 	// Callbacks
 	OnSwitch func(profile string)
-	OnSync   func(profiles interface{})
+	OnSync   func(profiles interface{}, usbForwardingEnabled bool)
 	OnInput  func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64)
 
 	mu          sync.Mutex
@@ -167,7 +167,7 @@ func (c *WSClient) handleMessage(msg protocol.Message) {
 		json.Unmarshal(bytes, &payload)
 
 		if c.OnSync != nil {
-			c.OnSync(payload.Profiles)
+			c.OnSync(payload.Profiles, payload.USBForwardingEnabled)
 		}
 
 	case protocol.TypeInput:

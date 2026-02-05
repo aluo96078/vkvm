@@ -207,7 +207,8 @@ func runService(cfgMgr *config.Manager) {
 	}
 
 	// Input handling based on role
-	if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" && cfg.General.USBForwardingEnabled {
+	log.Printf("Role: %s, CoordinatorAddr: %s", cfg.General.Role, cfg.General.CoordinatorAddr)
+	if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" {
 		// Create input injector
 		injector := input.NewInjector()
 
@@ -250,7 +251,14 @@ func runService(cfgMgr *config.Manager) {
 
 		// Set up event handler for received input events
 		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64) {
-			// Check if injection is allowed
+			// Check if USB forwarding is enabled from Host config
+			currentCfg := cfgMgr.Get()
+			if !currentCfg.General.USBForwardingEnabled {
+				// USB forwarding disabled by Host, ignore input
+				return
+			}
+
+			// Check if injection is allowed based on profile
 			injectionMutex.Lock()
 			shouldInject := allowInjection
 			injectionMutex.Unlock()
@@ -290,8 +298,6 @@ func runService(cfgMgr *config.Manager) {
 		}
 
 		wsClient.Start()
-	} else if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" && !cfg.General.USBForwardingEnabled {
-		log.Printf("Agent mode: USB forwarding disabled, skipping input injection setup")
 	} else if cfg.General.Role == "host" {
 		// Check administrator privileges on Windows
 		if runtime.GOOS == "windows" {
@@ -300,6 +306,7 @@ func runService(cfgMgr *config.Manager) {
 		}
 
 		// Start input capture on host (only if USB forwarding is enabled)
+		log.Printf("Host mode: USB Forwarding Enabled: %v", cfg.General.USBForwardingEnabled)
 		if cfg.General.USBForwardingEnabled {
 			inputTrap = input.NewTrap()
 
