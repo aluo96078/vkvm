@@ -654,8 +654,8 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             document.getElementById('role').value = config.general.role || 'host';
             document.getElementById('coordinator-addr').value = config.general.coordinator_addr || '';
             document.getElementById('agent-profile').value = config.general.agent_profile || '';
-            document.getElementById('usb-forwarding-enabled').checked = config.general.usb_forwarding_enabled !== false; // Default to true
-            document.getElementById('input-capture-enabled').checked = config.general.input_capture_enabled || false;
+            document.getElementById('usb-forwarding-enabled').checked = config.general.usb_forwarding_enabled === true;
+            document.getElementById('input-capture-enabled').checked = config.general.input_capture_enabled === true;
             document.getElementById('escape-hotkey').value = config.general.escape_hotkey || 'Ctrl+Alt+Shift+Esc';
             
             const isAgent = config.general.role === 'agent';
@@ -664,6 +664,17 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             document.getElementById('agent-sync-notice').style.display = isAgent ? 'block' : 'none';
             document.getElementById('agent-settings').style.display = isAgent ? 'block' : 'none';
             document.getElementById('host-settings').style.display = isAgent ? 'none' : 'block';
+
+            // Disable input capture checkbox if agent profile is set (dynamic control)
+            const inputCaptureCheckbox = document.getElementById('input-capture-enabled');
+            const agentProfile = config.general.agent_profile || '';
+            if (!isAgent && agentProfile.trim() !== '') {
+                inputCaptureCheckbox.disabled = true;
+                inputCaptureCheckbox.title = 'Disabled: Input capture is controlled automatically based on active profile';
+            } else {
+                inputCaptureCheckbox.disabled = false;
+                inputCaptureCheckbox.title = '';
+            }
         }
 
         function toggleCoordinatorUI() {
@@ -682,7 +693,11 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             config.general.coordinator_addr = document.getElementById('coordinator-addr').value;
             config.general.agent_profile = document.getElementById('agent-profile').value;
             config.general.usb_forwarding_enabled = document.getElementById('usb-forwarding-enabled').checked;
-            config.general.input_capture_enabled = document.getElementById('input-capture-enabled').checked;
+            // Only update input_capture_enabled if not using dynamic control
+            const agentProfile = document.getElementById('agent-profile').value.trim();
+            if (agentProfile === '') {
+                config.general.input_capture_enabled = document.getElementById('input-capture-enabled').checked;
+            }
             config.general.escape_hotkey = document.getElementById('escape-hotkey').value;
         }
 

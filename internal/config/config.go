@@ -108,10 +108,10 @@ type GeneralConfig struct {
 	AgentProfile string `json:"agent_profile,omitempty"`
 
 	// InputCaptureEnabled enables complete input capture mode on Host (prevents local system from receiving input)
-	InputCaptureEnabled bool `json:"input_capture_enabled,omitempty"`
+	InputCaptureEnabled bool `json:"input_capture_enabled"`
 
 	// USBForwardingEnabled enables USB input forwarding (keyboard/mouse capture and injection)
-	USBForwardingEnabled bool `json:"usb_forwarding_enabled,omitempty"`
+	USBForwardingEnabled bool `json:"usb_forwarding_enabled"`
 
 	// EscapeHotkey is the emergency hotkey to disable input capture (e.g. "Ctrl+Alt+Shift+Esc")
 	EscapeHotkey string `json:"escape_hotkey,omitempty"`
