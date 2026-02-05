@@ -149,9 +149,9 @@ type RAWINPUTHEADER struct {
 
 type RAWMOUSE struct {
 	UsFlags            uint16
-	UlButtons          uint32
-	UsButtonFlags      uint16
-	UsButtonData       uint16
+	_                  uint16  // padding for alignment
+	UsButtonFlags      uint16  // union: can also be accessed as ulButtons (uint32)
+	UsButtonData       uint16  // union: part of ulButtons
 	UlRawButtons       uint32
 	LLastX             int32
 	LLastY             int32
