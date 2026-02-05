@@ -248,3 +248,21 @@ func (m *WSManager) BroadcastSwitch(profile string, origin string) {
 	}
 	m.broadcast <- msg
 }
+
+// Public method to broadcast input events from the Host to all Agents
+func (m *WSManager) BroadcastInput(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
+	msg := protocol.Message{
+		Type: protocol.TypeInput,
+		Payload: protocol.InputPayload{
+			Type:      eventType,
+			DeltaX:    deltaX,
+			DeltaY:    deltaY,
+			Button:    button,
+			Pressed:   pressed,
+			KeyCode:   keyCode,
+			Modifiers: modifiers,
+			Timestamp: timestamp,
+		},
+	}
+	m.broadcast <- msg
+}

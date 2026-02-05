@@ -31,6 +31,11 @@ func NewServer(configMgr *config.Manager, sw *switcher.Switcher) *Server {
 	return s
 }
 
+// BroadcastInput broadcasts input events to all connected agents
+func (s *Server) BroadcastInput(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
+	s.wsMgr.BroadcastInput(eventType, deltaX, deltaY, button, pressed, keyCode, modifiers, timestamp)
+}
+
 // Start starts the API server on the specified port
 func (s *Server) Start(port int) error {
 	cfg := s.configMgr.Get()

@@ -159,6 +159,7 @@ func runService(cfgMgr *config.Manager) {
 
 	// Start API server if enabled
 	cfg := cfgMgr.Get()
+	var apiServer *api.Server
 	if cfg.General.APIEnabled {
 		// New: Ensure firewall rule exists on Windows
 		if runtime.GOOS == "windows" {
@@ -169,7 +170,7 @@ func runService(cfgMgr *config.Manager) {
 			}()
 		}
 
-		apiServer := api.NewServer(cfgMgr, sw)
+		apiServer = api.NewServer(cfgMgr, sw)
 
 		// Wire up switcher -> api broadcast for WebSocket
 		sw.SetOnSwitch(func(profileName string) {
@@ -192,47 +193,96 @@ func runService(cfgMgr *config.Manager) {
 		log.Printf("Warning: Hotkey Engine failed to start: %v", err)
 	}
 
-	// Input capture for agent mode
+	// Debug: Log configuration
+	log.Printf("[DEBUG] Configuration: Role=%s, APIEnabled=%t", cfg.General.Role, cfg.General.APIEnabled)
+
+	// Input capture for host mode (capture and broadcast to agents)
 	var inputTrap *input.Trap
-	if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" {
-		log.Printf("Starting input capture for agent mode")
+	if cfg.General.Role == "host" && cfg.General.APIEnabled {
+		log.Printf("[HOST] Starting input capture for host mode")
 		inputTrap = input.NewTrap()
-
-		// Set up WebSocket client for agent
-		wsClient := network.NewWSClient(cfg.General.CoordinatorAddr, cfg.General.APIToken)
-
-		// Set up event handler for received input events
-		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
-			log.Printf("[AGENT] Received input event: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X, modifiers:0x%X)",
-				eventType, deltaX, deltaY, button, pressed, keyCode, modifiers)
-
-			// TODO: Inject input on Windows agent
-		}
-
-		wsClient.Start()
 
 		// Start input capture
 		if err := inputTrap.Start(); err != nil {
-			log.Printf("Failed to start input capture: %v", err)
+			log.Printf("[HOST] Failed to start input capture: %v", err)
 		} else {
-			log.Printf("Input capture started for agent mode")
+			log.Printf("[HOST] Input capture started successfully")
 
-			// Process captured events
+			// Process captured events and broadcast to agents
 			go func() {
+				eventCount := 0
 				for event := range inputTrap.Events() {
-					if wsClient.IsConnected() {
-						log.Printf("[AGENT] Sending event: %s", event.Type)
-						wsClient.SendInputEvent(
-							event.Type,
-							event.DeltaX, event.DeltaY,
-							event.Button, event.Pressed,
-							event.KeyCode, event.Modifiers,
-							event.Timestamp,
-						)
-					}
+					eventCount++
+					log.Printf("[HOST-CAPTURE] Event #%d: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X, modifiers:0x%X, ts:%d)",
+						eventCount, event.Type, event.DeltaX, event.DeltaY,
+						event.Button, event.Pressed, event.KeyCode, event.Modifiers, event.Timestamp)
+
+					// Broadcast to all connected agents
+					apiServer.BroadcastInput(
+						event.Type,
+						event.DeltaX, event.DeltaY,
+						event.Button, event.Pressed,
+						event.KeyCode, event.Modifiers,
+						event.Timestamp,
+					)
+					log.Printf("[HOST-BROADCAST] Event #%d broadcasted to agents", eventCount)
 				}
 			}()
 		}
+	}
+
+	// Input capture for agent mode (receive from host and inject)
+	var wsClient *network.WSClient
+	if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" {
+		log.Printf("[AGENT] Starting agent mode to receive input from host")
+
+		// Create input injector
+		injector := input.NewInjector()
+		log.Printf("[AGENT] Input injector created")
+
+		// Set up WebSocket client for agent
+		wsClient = network.NewWSClient(cfg.General.CoordinatorAddr, cfg.General.APIToken)
+
+		// Set up event handler for received input events
+		receivedCount := 0
+		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, timestamp int64) {
+			receivedCount++
+			log.Printf("[AGENT-RECEIVE] Event #%d: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X, modifiers:0x%X, ts:%d)",
+				receivedCount, eventType, deltaX, deltaY, button, pressed, keyCode, modifiers, timestamp)
+
+			// Inject input on macOS agent
+			var err error
+			switch eventType {
+			case "mouse_move":
+				err = injector.InjectMouseMove(deltaX, deltaY)
+				if err != nil {
+					log.Printf("[AGENT-INJECT] Failed to inject mouse move: %v", err)
+				} else {
+					log.Printf("[AGENT-INJECT] Event #%d: Mouse move injected successfully", receivedCount)
+				}
+			case "mouse_btn":
+				err = injector.InjectMouseButton(button, pressed)
+				if err != nil {
+					log.Printf("[AGENT-INJECT] Failed to inject mouse button: %v", err)
+				} else {
+					log.Printf("[AGENT-INJECT] Event #%d: Mouse button %d %s injected successfully", 
+						receivedCount, button, map[bool]string{true: "pressed", false: "released"}[pressed])
+				}
+			case "key":
+				err = injector.InjectKey(keyCode, pressed, modifiers)
+				if err != nil {
+					log.Printf("[AGENT-INJECT] Failed to inject key: %v", err)
+				} else {
+					log.Printf("[AGENT-INJECT] Event #%d: Key 0x%X %s injected successfully", 
+						receivedCount, keyCode, map[bool]string{true: "pressed", false: "released"}[pressed])
+				}
+			default:
+				log.Printf("[AGENT-INJECT] Unknown event type: %s", eventType)
+			}
+		}
+
+		wsClient.Start()
+		log.Printf("[AGENT] Connected to host, ready to receive input events")
 	}
 
 	// Tray instance
