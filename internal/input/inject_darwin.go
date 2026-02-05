@@ -4,17 +4,23 @@ package input
 
 /*
 #cgo CFLAGS: -x objective-c
-#cgo LDFLAGS: -framework CoreGraphics -framework CoreFoundation
+#cgo LDFLAGS: -framework CoreGraphics -framework CoreFoundation -framework ApplicationServices
 
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <ApplicationServices/ApplicationServices.h>
+
+// Check if we have accessibility permissions
+bool hasAccessibilityPermissions() {
+    return AXIsProcessTrusted();
+}
 
 // Helper functions
 void injectMouseMove(CGFloat dx, CGFloat dy) {
     CGEventRef event = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, CGPointZero, kCGMouseButtonLeft);
     CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, (int64_t)dx);
     CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, (int64_t)dy);
-    CGEventPost(kCGHIDEventTap, event);
+    CGEventPost(kCGSessionEventTap, event);
     CFRelease(event);
 }
 
@@ -46,14 +52,14 @@ void injectMouseButton(int button, bool pressed) {
     }
 
     CGEventRef event = CGEventCreateMouseEvent(NULL, eventType, CGPointZero, cgButton);
-    CGEventPost(kCGHIDEventTap, event);
+    CGEventPost(kCGSessionEventTap, event);
     CFRelease(event);
 }
 
 void injectKey(CGKeyCode keyCode, bool pressed) {
     CGEventType eventType = pressed ? kCGEventKeyDown : kCGEventKeyUp;
     CGEventRef event = CGEventCreateKeyboardEvent(NULL, keyCode, pressed);
-    CGEventPost(kCGHIDEventTap, event);
+    CGEventPost(kCGSessionEventTap, event);
     CFRelease(event);
 }
 */
@@ -69,12 +75,22 @@ type Injector struct{}
 
 // NewInjector creates a new input injector for macOS
 func NewInjector() *Injector {
+	// Check accessibility permissions
+	if !C.hasAccessibilityPermissions() {
+		fmt.Printf("[DARWIN-INJECT] WARNING: Accessibility permissions not granted!\n")
+		fmt.Printf("[DARWIN-INJECT] Please enable 'Accessibility' permission for this application in System Preferences > Security & Privacy > Privacy > Accessibility\n")
+	} else {
+		fmt.Printf("[DARWIN-INJECT] Accessibility permissions granted\n")
+	}
 	return &Injector{}
 }
 
 // InjectMouseMove injects a mouse movement event
 func (i *Injector) InjectMouseMove(dx, dy int) error {
+	// Log the injection attempt
+	fmt.Printf("[DARWIN-INJECT] Injecting mouse move: dx=%d, dy=%d\n", dx, dy)
 	C.injectMouseMove(C.CGFloat(dx), C.CGFloat(dy))
+	fmt.Printf("[DARWIN-INJECT] Mouse move injection completed\n")
 	return nil
 }
 

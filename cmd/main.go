@@ -157,6 +157,9 @@ func runService(cfgMgr *config.Manager) {
 		log.Fatalf("Failed to create switcher: %v", err)
 	}
 
+	// WebSocket client for agent mode
+	var wsClient *network.WSClient
+
 	// Start API server if enabled
 	cfg := cfgMgr.Get()
 	var apiServer *api.Server
@@ -196,43 +199,7 @@ func runService(cfgMgr *config.Manager) {
 	// Debug: Log configuration
 	log.Printf("[DEBUG] Configuration: Role=%s, APIEnabled=%t", cfg.General.Role, cfg.General.APIEnabled)
 
-	// Input capture for host mode (capture and broadcast to agents)
-	var inputTrap *input.Trap
-	if cfg.General.Role == "host" && cfg.General.APIEnabled {
-		log.Printf("[HOST] Starting input capture for host mode")
-		inputTrap = input.NewTrap()
-
-		// Start input capture
-		if err := inputTrap.Start(); err != nil {
-			log.Printf("[HOST] Failed to start input capture: %v", err)
-		} else {
-			log.Printf("[HOST] Input capture started successfully")
-
-			// Process captured events and broadcast to agents
-			go func() {
-				eventCount := 0
-				for event := range inputTrap.Events() {
-					eventCount++
-					log.Printf("[HOST-CAPTURE] Event #%d: %s (dx:%d, dy:%d, btn:%d, pressed:%v, key:0x%X, modifiers:0x%X, ts:%d)",
-						eventCount, event.Type, event.DeltaX, event.DeltaY,
-						event.Button, event.Pressed, event.KeyCode, event.Modifiers, event.Timestamp)
-
-					// Broadcast to all connected agents
-					apiServer.BroadcastInput(
-						event.Type,
-						event.DeltaX, event.DeltaY,
-						event.Button, event.Pressed,
-						event.KeyCode, event.Modifiers,
-						event.Timestamp,
-					)
-					log.Printf("[HOST-BROADCAST] Event #%d broadcasted to agents", eventCount)
-				}
-			}()
-		}
-	}
-
-	// Input capture for agent mode (receive from host and inject)
-	var wsClient *network.WSClient
+	// Input handling based on role
 	if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" {
 		log.Printf("[AGENT] Starting agent mode to receive input from host")
 
@@ -283,6 +250,40 @@ func runService(cfgMgr *config.Manager) {
 
 		wsClient.Start()
 		log.Printf("[AGENT] Connected to host, ready to receive input events")
+	} else if cfg.General.Role == "host" {
+		log.Printf("[HOST] Starting host mode - will capture input and send to agents")
+
+		// Start input capture on host
+		inputTrap := input.NewTrap()
+		if err := inputTrap.Start(); err != nil {
+			log.Printf("[HOST] Failed to start input capture: %v", err)
+		} else {
+			log.Printf("[HOST] Input capture started, will send events to agents")
+
+			// Process captured events and broadcast to all connected agents
+			go func() {
+				eventCount := 0
+				for event := range inputTrap.Events() {
+					eventCount++
+					if eventCount%100 == 0 { // Log progress every 100 events
+						log.Printf("[HOST] Sent %d events to agents", eventCount)
+					}
+
+					// Broadcast input event to all connected agents via API server
+					if apiServer != nil {
+						apiServer.BroadcastInput(
+							event.Type,
+							event.DeltaX, event.DeltaY,
+							event.Button, event.Pressed,
+							event.KeyCode, event.Modifiers,
+							event.Timestamp,
+						)
+					} else {
+						log.Printf("[HOST] API server not available, cannot broadcast event")
+					}
+				}
+			}()
+		}
 	}
 
 	// Tray instance

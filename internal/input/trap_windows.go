@@ -24,6 +24,8 @@ type Trap struct {
 	cursorY    int
 	mouseHook  syscall.Handle
 	keyHook    syscall.Handle
+	lastMouseX int32
+	lastMouseY int32
 }
 
 // Windows API constants and types
@@ -190,9 +192,11 @@ type RAWINPUT struct {
 // NewTrap creates a new input trap for Windows
 func NewTrap() *Trap {
 	return &Trap{
-		events:  make(chan InputEvent, 100),
-		cursorX: 0,
-		cursorY: 0,
+		events:     make(chan InputEvent, 1000), // Increased buffer size
+		cursorX:    0,
+		cursorY:    0,
+		lastMouseX: -1,
+		lastMouseY: -1,
 	}
 }
 
@@ -205,9 +209,14 @@ func (t *Trap) Start() error {
 		return fmt.Errorf("trap already running")
 	}
 
-	// Create window for hotkey only
+	// Create window for raw input
 	if err := t.createWindow(); err != nil {
 		return fmt.Errorf("failed to create window: %w", err)
+	}
+
+	// Register for raw input
+	if err := t.registerRawInput(); err != nil {
+		return fmt.Errorf("failed to register raw input: %w", err)
 	}
 
 	// Register kill switch hotkey (Ctrl+Alt+Esc)
@@ -217,8 +226,8 @@ func (t *Trap) Start() error {
 
 	t.running = true
 
-	// Start hook thread
-	go t.hookThread()
+	// Start message loop thread
+	go t.messageLoop()
 
 	return nil
 }
@@ -366,6 +375,12 @@ func (t *Trap) registerRawInput() error {
 			DwFlags:     RIDEV_INPUTSINK,
 			HwndTarget:  t.hwnd,
 		},
+		{
+			UsUsagePage: 0x01, // HID_USAGE_PAGE_GENERIC
+			UsUsage:     0x06, // HID_USAGE_GENERIC_KEYBOARD
+			DwFlags:     RIDEV_INPUTSINK,
+			HwndTarget:  t.hwnd,
+		},
 	}
 
 	for i, rid := range rids {
@@ -484,13 +499,19 @@ func (t *Trap) handleRawInput(lparam uintptr) {
 
 	var size uint32 = 0
 
-	// Get the size of the raw input data
-	GetRawInputData.Call(
+	// Get the size of the raw input data (first call with NULL data pointer)
+	ret, _, err := GetRawInputData.Call(
 		lparam,
+		RID_INPUT,
+		0, // NULL data pointer
 		uintptr(unsafe.Pointer(&size)),
 		unsafe.Sizeof(RAWINPUTHEADER{}),
-		uintptr(unsafe.Pointer(&size)),
 	)
+
+	if ret == 0xFFFFFFFF { // error
+		log.Printf("GetRawInputData (size query) failed: ret=0x%X, err=%v", ret, err)
+		return
+	}
 
 	if size == 0 {
 		log.Printf("Raw input data size is 0, skipping")
@@ -501,15 +522,21 @@ func (t *Trap) handleRawInput(lparam uintptr) {
 
 	// Allocate buffer for raw input data
 	data := make([]byte, size)
-	ret, _, _ := GetRawInputData.Call(
+	ret, _, err = GetRawInputData.Call(
 		lparam,
+		RID_INPUT,
 		uintptr(unsafe.Pointer(&data[0])),
-		uintptr(size),
+		uintptr(unsafe.Pointer(&size)),
 		unsafe.Sizeof(RAWINPUTHEADER{}),
 	)
 
 	if ret == 0xFFFFFFFF { // error
-		log.Printf("GetRawInputData failed with error code: 0x%X", ret)
+		log.Printf("GetRawInputData (data retrieval) failed: ret=0x%X, err=%v", ret, err)
+		return
+	}
+
+	if ret == 0 {
+		log.Printf("GetRawInputData returned 0 bytes, skipping")
 		return
 	}
 
@@ -522,8 +549,13 @@ func (t *Trap) handleRawInput(lparam uintptr) {
 	if rawInput.Header.DwType == RIM_TYPEMOUSE {
 		log.Printf("Processing mouse input event")
 		t.handleMouseInput(&rawInput.Mouse)
+	} else if rawInput.Header.DwType == RIM_TYPEKEYBOARD {
+		log.Printf("Processing keyboard input event")
+		// Access keyboard data from the union
+		keyboard := (*RAWKEYBOARD)(unsafe.Pointer(&rawInput.Mouse))
+		t.handleKeyboardInput(keyboard)
 	} else {
-		log.Printf("Ignoring non-mouse input event (type: %d)", rawInput.Header.DwType)
+		log.Printf("Ignoring input event (type: %d)", rawInput.Header.DwType)
 	}
 }
 
@@ -532,59 +564,109 @@ func (t *Trap) handleMouseInput(mouse *RAWMOUSE) {
 	log.Printf("Processing mouse input: flags=0x%X, buttons=0x%X, lastX=%d, lastY=%d",
 		mouse.UsFlags, mouse.UsButtonFlags, mouse.LLastX, mouse.LLastY)
 
-	event := InputEvent{
-		Type:      "mouse_move",
-		DeltaX:    int(mouse.LLastX),
-		DeltaY:    int(mouse.LLastY),
-		Timestamp: time.Now().UnixMilli(),
+	// Handle mouse movement (only if there's actual movement)
+	if mouse.LLastX != 0 || mouse.LLastY != 0 {
+		event := InputEvent{
+			Type:      "mouse_move",
+			DeltaX:    int(mouse.LLastX),
+			DeltaY:    int(mouse.LLastY),
+			Timestamp: time.Now().UnixMilli(),
+		}
+
+		// Update virtual cursor position (for relative movement)
+		t.cursorX += event.DeltaX
+		t.cursorY += event.DeltaY
+
+		log.Printf("Updated virtual cursor position: (%d, %d)", t.cursorX, t.cursorY)
+
+		log.Printf("Sending mouse move event to channel: %+v", event)
+		select {
+		case t.events <- event:
+			log.Printf("Mouse move event sent to channel successfully")
+		default:
+			log.Printf("Event channel full, dropping mouse move event")
+		}
 	}
 
-	// Update virtual cursor position (for relative movement)
-	t.cursorX += event.DeltaX
-	t.cursorY += event.DeltaY
-
-	log.Printf("Updated virtual cursor position: (%d, %d)", t.cursorX, t.cursorY)
-
-	// Handle mouse buttons
+	// Handle mouse buttons (separate events)
 	if mouse.UsButtonFlags&0x0001 != 0 { // RI_MOUSE_LEFT_BUTTON_DOWN
 		log.Printf("Left mouse button down")
-		event.Type = "mouse_btn"
-		event.Button = 1
-		event.Pressed = true
+		event := InputEvent{
+			Type:      "mouse_btn",
+			Button:    1,
+			Pressed:   true,
+			Timestamp: time.Now().UnixMilli(),
+		}
+		select {
+		case t.events <- event:
+		default:
+			log.Printf("Event channel full, dropping left button down event")
+		}
 	} else if mouse.UsButtonFlags&0x0002 != 0 { // RI_MOUSE_LEFT_BUTTON_UP
 		log.Printf("Left mouse button up")
-		event.Type = "mouse_btn"
-		event.Button = 1
-		event.Pressed = false
+		event := InputEvent{
+			Type:      "mouse_btn",
+			Button:    1,
+			Pressed:   false,
+			Timestamp: time.Now().UnixMilli(),
+		}
+		select {
+		case t.events <- event:
+		default:
+			log.Printf("Event channel full, dropping left button up event")
+		}
 	} else if mouse.UsButtonFlags&0x0004 != 0 { // RI_MOUSE_RIGHT_BUTTON_DOWN
 		log.Printf("Right mouse button down")
-		event.Type = "mouse_btn"
-		event.Button = 2
-		event.Pressed = true
+		event := InputEvent{
+			Type:      "mouse_btn",
+			Button:    2,
+			Pressed:   true,
+			Timestamp: time.Now().UnixMilli(),
+		}
+		select {
+		case t.events <- event:
+		default:
+			log.Printf("Event channel full, dropping right button down event")
+		}
 	} else if mouse.UsButtonFlags&0x0008 != 0 { // RI_MOUSE_RIGHT_BUTTON_UP
 		log.Printf("Right mouse button up")
-		event.Type = "mouse_btn"
-		event.Button = 2
-		event.Pressed = false
+		event := InputEvent{
+			Type:      "mouse_btn",
+			Button:    2,
+			Pressed:   false,
+			Timestamp: time.Now().UnixMilli(),
+		}
+		select {
+		case t.events <- event:
+		default:
+			log.Printf("Event channel full, dropping right button up event")
+		}
 	} else if mouse.UsButtonFlags&0x0010 != 0 { // RI_MOUSE_MIDDLE_BUTTON_DOWN
 		log.Printf("Middle mouse button down")
-		event.Type = "mouse_btn"
-		event.Button = 3
-		event.Pressed = true
+		event := InputEvent{
+			Type:      "mouse_btn",
+			Button:    3,
+			Pressed:   true,
+			Timestamp: time.Now().UnixMilli(),
+		}
+		select {
+		case t.events <- event:
+		default:
+			log.Printf("Event channel full, dropping middle button down event")
+		}
 	} else if mouse.UsButtonFlags&0x0020 != 0 { // RI_MOUSE_MIDDLE_BUTTON_UP
 		log.Printf("Middle mouse button up")
-		event.Type = "mouse_btn"
-		event.Button = 3
-		event.Pressed = false
-	}
-
-	log.Printf("Sending event to channel: %+v", event)
-	select {
-	case t.events <- event:
-		log.Printf("Event sent to channel successfully")
-	default:
-		log.Printf("Event channel full, dropping event")
-		// Channel full, drop event
+		event := InputEvent{
+			Type:      "mouse_btn",
+			Button:    3,
+			Pressed:   false,
+			Timestamp: time.Now().UnixMilli(),
+		}
+		select {
+		case t.events <- event:
+		default:
+			log.Printf("Event channel full, dropping middle button up event")
+		}
 	}
 }
 
@@ -687,6 +769,7 @@ func (t *Trap) hookThread() {
 // mouseHookProc handles mouse hook events
 func (t *Trap) mouseHookProc(nCode int32, wParam uintptr, lParam uintptr) uintptr {
 	if nCode >= 0 {
+		hookStruct := (*MSLLHOOKSTRUCT)(unsafe.Pointer(lParam))
 		msg := uint32(wParam)
 
 		event := InputEvent{
@@ -699,8 +782,18 @@ func (t *Trap) mouseHookProc(nCode int32, wParam uintptr, lParam uintptr) uintpt
 		switch msg {
 		case WM_MOUSEMOVE:
 			event.Type = "mouse_move"
-			event.DeltaX = 1
-			event.DeltaY = 1
+			// Calculate relative movement from last position
+			if t.lastMouseX != -1 && t.lastMouseY != -1 {
+				event.DeltaX = int(hookStruct.Pt.X - t.lastMouseX)
+				event.DeltaY = int(hookStruct.Pt.Y - t.lastMouseY)
+			} else {
+				// First mouse move, just initialize position without sending event
+				event.DeltaX = 0
+				event.DeltaY = 0
+			}
+			// Update last position
+			t.lastMouseX = hookStruct.Pt.X
+			t.lastMouseY = hookStruct.Pt.Y
 		case WM_LBUTTONDOWN:
 			event.Type = "mouse_btn"
 			event.Button = 1
@@ -761,12 +854,7 @@ func (t *Trap) keyboardHookProc(nCode int32, wParam uintptr, lParam uintptr) uin
 			event.Pressed = false
 		}
 
-		// Only log special keys to reduce spam
-		if hookStruct.VkCode >= 0x10 && hookStruct.VkCode <= 0x5A { // A-Z, 0-9, etc.
-			// Don't log regular keys
-		} else {
-			log.Printf("[HOOK] Special key: 0x%X, pressed=%v", hookStruct.VkCode, event.Pressed)
-		}
+		// Don't log anything to avoid blocking
 
 		select {
 		case t.events <- event:
