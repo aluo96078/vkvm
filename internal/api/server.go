@@ -15,10 +15,11 @@ import (
 
 // Server provides HTTP API for remote control
 type Server struct {
-	configMgr *config.Manager
-	switcher  *switcher.Switcher
-	token     string
-	wsMgr     *WSManager
+	configMgr              *config.Manager
+	switcher               *switcher.Switcher
+	token                  string
+	wsMgr                  *WSManager
+	lastUSBForwardingState bool // Track last USB forwarding state for change detection
 }
 
 // NewServer creates a new API server
@@ -28,6 +29,21 @@ func NewServer(configMgr *config.Manager, sw *switcher.Switcher) *Server {
 		switcher:  sw,
 	}
 	s.wsMgr = newWSManager(s)
+
+	// Initialize last USB forwarding state
+	cfg := configMgr.Get()
+	s.lastUSBForwardingState = cfg.General.USBForwardingEnabled
+
+	// Register callback for USB forwarding changes
+	configMgr.RegisterChangeCallback(func() {
+		cfg := configMgr.Get()
+		if cfg.General.USBForwardingEnabled != s.lastUSBForwardingState {
+			log.Printf("API Server: USB forwarding setting changed from %v to %v, broadcasting to agents", s.lastUSBForwardingState, cfg.General.USBForwardingEnabled)
+			s.wsMgr.BroadcastUSBForwarding(cfg.General.USBForwardingEnabled)
+			s.lastUSBForwardingState = cfg.General.USBForwardingEnabled
+		}
+	})
+
 	return s
 }
 
@@ -190,6 +206,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			log.Printf("API: Failed to save received config: %v", err)
 			http.Error(w, "Failed to save configuration", http.StatusInternalServerError)
 			return
+		}
+
+		// Immediately broadcast USB forwarding change to connected agents
+		log.Printf("API: Config POST received, broadcasting USB forwarding=%v to agents", newCfg.General.USBForwardingEnabled)
+		if s.wsMgr != nil {
+			s.wsMgr.BroadcastUSBForwarding(newCfg.General.USBForwardingEnabled)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

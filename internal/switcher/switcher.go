@@ -61,6 +61,12 @@ func New(configMgr *config.Manager) (*Switcher, error) {
 			s.configMgr.UpdateUSBForwardingFromHost(usbForwardingEnabled)
 		}
 
+		s.wsClient.OnUSBForwardingUpdate = func(enabled bool) {
+			log.Printf("Switcher: Received USB forwarding update from Host: %v", enabled)
+			// Update USB forwarding setting from Host
+			s.configMgr.UpdateUSBForwardingFromHost(enabled)
+		}
+
 		// Start client
 		s.wsClient.Start()
 	}

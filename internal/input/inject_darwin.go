@@ -34,6 +34,10 @@ static int g_leftButtonDown = 0;
 static int g_rightButtonDown = 0;
 static int g_middleButtonDown = 0;
 
+// Track modifier key state — explicitly applied to all injected mouse events
+// so that macOS tools (e.g. screenshot) see the correct modifiers.
+static CGEventFlags g_modifierFlags = 0;
+
 // Track click state for double-click detection
 static CFAbsoluteTime g_lastClickTime = 0;
 static CGPoint g_lastClickPos = {0, 0};
@@ -71,6 +75,9 @@ void injectMouseMoveRelative(CGFloat dx, CGFloat dy) {
         // Set relative delta values for proper mouse acceleration handling
         CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, (int64_t)dx);
         CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, (int64_t)dy);
+        // Explicitly set modifier flags — prevents stale modifiers (e.g. Shift)
+        // from being inherited from system state, which breaks screenshot Y-axis drag
+        CGEventSetFlags(event, g_modifierFlags);
         CGEventPost(kCGSessionEventTap, event);
         CFRelease(event);
     }
@@ -143,6 +150,8 @@ void injectMouseButton(int button, bool pressed) {
         if (button >= 3) {
             CGEventSetIntegerValueField(event, kCGMouseEventButtonNumber, cgButton);
         }
+        // Explicitly set modifier flags for correct modifier state on button events
+        CGEventSetFlags(event, g_modifierFlags);
         CGEventPost(kCGSessionEventTap, event);
         CFRelease(event);
     }
@@ -150,26 +159,20 @@ void injectMouseButton(int button, bool pressed) {
 
 // Scroll wheel injection: vertical and horizontal
 void injectMouseWheel(int deltaY, int deltaX) {
-    // CGEventCreateScrollWheelEvent uses scroll units (typically lines)
-    // Windows WHEEL_DELTA is 120 for one notch, so we normalize
-    int32_t scrollDeltaY = deltaY / 120;  // Convert to scroll lines
-    int32_t scrollDeltaX = deltaX / 120;
-
-    // If delta is less than one unit but non-zero, still scroll at least one unit
-    if (deltaY != 0 && scrollDeltaY == 0) {
-        scrollDeltaY = deltaY > 0 ? 1 : -1;
-    }
-    if (deltaX != 0 && scrollDeltaX == 0) {
-        scrollDeltaX = deltaX > 0 ? 1 : -1;
-    }
+    // Windows WHEEL_DELTA is 120 per notch.
+    // Use pixel-based scrolling for smoother, natural-feeling distance on macOS.
+    // Multiplier 3 ≈ 3 pixels per Windows delta unit, so one notch (120) ≈ 360px —
+    // close to macOS trackpad "one swipe" feel. Adjust if needed.
+    int32_t scrollPixelsY = (deltaY * 3);
+    int32_t scrollPixelsX = (deltaX * 3);
 
     // Handle vertical scroll
-    if (scrollDeltaY != 0) {
+    if (scrollPixelsY != 0) {
         CGEventRef event = CGEventCreateScrollWheelEvent(
             NULL,
-            kCGScrollEventUnitLine,
+            kCGScrollEventUnitPixel,
             1,  // wheel count: 1 for vertical only
-            scrollDeltaY
+            scrollPixelsY
         );
         if (event) {
             CGEventPost(kCGSessionEventTap, event);
@@ -178,13 +181,13 @@ void injectMouseWheel(int deltaY, int deltaX) {
     }
 
     // Handle horizontal scroll separately
-    if (scrollDeltaX != 0) {
+    if (scrollPixelsX != 0) {
         CGEventRef event = CGEventCreateScrollWheelEvent(
             NULL,
-            kCGScrollEventUnitLine,
+            kCGScrollEventUnitPixel,
             2,  // wheel count: 2 for horizontal
             0,  // vertical delta
-            scrollDeltaX
+            scrollPixelsX
         );
         if (event) {
             CGEventPost(kCGSessionEventTap, event);
@@ -222,27 +225,21 @@ void injectKey(CGKeyCode keyCode, bool pressed, uint16 modifiers) {
     }
 
     if (isModifierKey) {
+        // Update tracked modifier flags
+        if (pressed) {
+            g_modifierFlags |= modifierFlag;
+        } else {
+            g_modifierFlags &= ~modifierFlag;
+        }
+
         // For modifier keys, use kCGEventFlagsChanged
-        CGEventRef event = CGEventCreate(NULL);
-        if (event) {
-            CGEventFlags currentFlags = CGEventGetFlags(event);
-            CFRelease(event);
-
-            CGEventFlags newFlags;
-            if (pressed) {
-                newFlags = currentFlags | modifierFlag;
-            } else {
-                newFlags = currentFlags & ~modifierFlag;
-            }
-
-            // Create a flags changed event
-            CGEventRef flagsEvent = CGEventCreateKeyboardEvent(NULL, keyCode, pressed);
-            if (flagsEvent) {
-                CGEventSetType(flagsEvent, kCGEventFlagsChanged);
-                CGEventSetFlags(flagsEvent, newFlags);
-                CGEventPost(kCGSessionEventTap, flagsEvent);
-                CFRelease(flagsEvent);
-            }
+        // Create a flags changed event with our tracked state
+        CGEventRef flagsEvent = CGEventCreateKeyboardEvent(NULL, keyCode, pressed);
+        if (flagsEvent) {
+            CGEventSetType(flagsEvent, kCGEventFlagsChanged);
+            CGEventSetFlags(flagsEvent, g_modifierFlags);
+            CGEventPost(kCGSessionEventTap, flagsEvent);
+            CFRelease(flagsEvent);
         }
     } else {
         // For regular keys, use normal key events

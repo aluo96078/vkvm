@@ -154,7 +154,7 @@ type Manager struct {
 	mu         sync.Mutex
 	configPath string
 	config     *Config
-	onChanged  func()
+	onChanged  []func()
 }
 
 // NewManager creates a new configuration manager
@@ -224,8 +224,15 @@ func (m *Manager) Load() error {
 	if err := json.Unmarshal(data, m.config); err != nil {
 		return err
 	}
-	if m.onChanged != nil {
-		m.onChanged()
+	// Notify registered callbacks about loaded config
+	if len(m.onChanged) > 0 {
+		callbacks := make([]func(), len(m.onChanged))
+		copy(callbacks, m.onChanged)
+		for _, cb := range callbacks {
+			if cb != nil {
+				cb()
+			}
+		}
 	}
 	return nil
 }
@@ -256,8 +263,16 @@ func (m *Manager) Set(config *Config) {
 	m.mu.Lock()
 	m.config = config
 	m.mu.Unlock()
-	if m.onChanged != nil {
-		m.onChanged()
+	// Call all registered change callbacks
+	m.mu.Lock()
+	callbacks := make([]func(), len(m.onChanged))
+	copy(callbacks, m.onChanged)
+	m.mu.Unlock()
+
+	for _, cb := range callbacks {
+		if cb != nil {
+			cb()
+		}
 	}
 }
 
@@ -265,7 +280,10 @@ func (m *Manager) Set(config *Config) {
 func (m *Manager) RegisterChangeCallback(fn func()) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.onChanged = fn
+	if fn == nil {
+		return
+	}
+	m.onChanged = append(m.onChanged, fn)
 }
 
 // GetProfile returns a profile by name

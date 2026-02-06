@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -26,7 +27,7 @@ type Trap struct {
 	keyHook        syscall.Handle
 	lastMouseX     int32
 	lastMouseY     int32
-	captureEnabled bool // When true, blocks input from reaching system
+	captureEnabled int32 // atomic: 1=enabled, 0=disabled
 }
 
 // Windows API constants and types
@@ -56,9 +57,12 @@ const (
 	WS_EX_TRANSPARENT      = 0x00000020
 	WS_EX_LAYERED          = 0x00080000
 	WS_EX_TOPMOST          = 0x00000008
+	WS_EX_TOOLWINDOW       = 0x00000080
+	WS_EX_NOACTIVATE       = 0x08000000
 	LWA_ALPHA              = 0x00000002
 	WS_VISIBLE             = 0x10000000
 	WS_POPUP               = 0x80000000
+	SW_HIDE                = 0
 	WH_MOUSE_LL            = 14
 	WH_KEYBOARD_LL         = 13
 	WM_MOUSEMOVE           = 0x0200
@@ -299,9 +303,11 @@ func (t *Trap) SetKillSwitch(callback func()) error {
 // EnableCapture enables or disables input capture mode
 // When enabled, input is blocked from reaching the system
 func (t *Trap) EnableCapture(enabled bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.captureEnabled = enabled
+	if enabled {
+		atomic.StoreInt32(&t.captureEnabled, 1)
+	} else {
+		atomic.StoreInt32(&t.captureEnabled, 0)
+	}
 
 	if enabled {
 		// Move cursor to center of screen when enabling capture
@@ -317,9 +323,7 @@ func (t *Trap) EnableCapture(enabled bool) {
 
 // IsCaptureEnabled returns whether capture mode is currently enabled
 func (t *Trap) IsCaptureEnabled() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.captureEnabled
+	return atomic.LoadInt32(&t.captureEnabled) == 1
 }
 
 // createWindow creates a transparent overlay window
@@ -346,13 +350,15 @@ func (t *Trap) createWindow() error {
 	var rect RECT
 	SystemParametersInfo.Call(uintptr(SPI_GETWORKAREA), 0, uintptr(unsafe.Pointer(&rect)), 0)
 
-	// Create a layered window for receiving raw input messages
+	// Create a hidden message-only window for hotkey registration and hook hosting
+	// WS_EX_TOOLWINDOW: no taskbar button
+	// WS_EX_NOACTIVATE: does not steal focus
 	hwnd, _, err := CreateWindowEx.Call(
-		WS_EX_LAYERED|WS_EX_TRANSPARENT, // layered and transparent
+		WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,
 		uintptr(unsafe.Pointer(className)),
 		0,          // no title
-		WS_VISIBLE, // visible window
-		0, 0, 1, 1, // 1x1 pixel window
+		WS_POPUP,   // no visible decoration, not shown
+		0, 0, 0, 0, // zero size
 		0, 0, 0, 0,
 	)
 	if hwnd == 0 {
@@ -361,11 +367,8 @@ func (t *Trap) createWindow() error {
 
 	t.hwnd = syscall.Handle(hwnd)
 
-	// Set window to be almost completely transparent (but visible)
-	SetLayeredWindowAttributes.Call(uintptr(hwnd), 0, 1, LWA_ALPHA)
-
-	// Try to bring window to foreground
-	SetForegroundWindow.Call(uintptr(hwnd))
+	// Ensure the window stays hidden
+	ShowWindow.Call(uintptr(hwnd), SW_HIDE)
 
 	return nil
 }
@@ -386,8 +389,8 @@ func (t *Trap) messageLoop() {
 			TranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
 			DispatchMessage.Call(uintptr(unsafe.Pointer(&msg)))
 		} else {
-			// No message, sleep a bit to avoid busy loop
-			time.Sleep(10 * time.Millisecond)
+			// No message, sleep briefly to avoid busy loop while keeping latency low
+			time.Sleep(1 * time.Millisecond)
 		}
 	}
 }
@@ -754,10 +757,8 @@ func (t *Trap) mouseHookProc(nCode int32, wParam uintptr, lParam uintptr) uintpt
 			Timestamp: time.Now().UnixMilli(),
 		}
 
-		// Check if we're in capture mode
-		t.mu.Lock()
-		captureEnabled := t.captureEnabled
-		t.mu.Unlock()
+		// Check if we're in capture mode (atomic for low overhead in hook)
+		captureEnabled := atomic.LoadInt32(&t.captureEnabled) == 1
 
 		switch msg {
 		case WM_MOUSEMOVE:
@@ -868,35 +869,45 @@ func (t *Trap) keyboardHookProc(nCode int32, wParam uintptr, lParam uintptr) uin
 	if nCode >= 0 {
 		hookStruct := (*KBDLLHOOKSTRUCT)(unsafe.Pointer(lParam))
 		msg := uint32(wParam)
+		vk := uint32(hookStruct.VkCode)
 
-		// Get current modifier states
+		// Determine pressed state first
+		var pressed bool
+		// WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101
+		// WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105
+		if msg == 0x0100 || msg == 0x0104 {
+			pressed = true
+		} else if msg == 0x0101 || msg == 0x0105 {
+			pressed = false
+		}
+
+		// Get current modifier states, but exclude the key being pressed/released
+		// to avoid self-referencing modifiers (critical for IME Shift toggle)
 		var modifiers uint16
-		if getKeyState(VK_LSHIFT) < 0 || getKeyState(VK_RSHIFT) < 0 {
+		isShiftKey := (vk == VK_LSHIFT || vk == VK_RSHIFT || vk == 0x10)
+		isCtrlKey := (vk == VK_LCONTROL || vk == VK_RCONTROL || vk == 0x11)
+		isAltKey := (vk == VK_LMENU || vk == VK_RMENU || vk == 0x12)
+		isWinKey := (vk == VK_LWIN || vk == VK_RWIN)
+
+		if !isShiftKey && (getKeyState(VK_LSHIFT) < 0 || getKeyState(VK_RSHIFT) < 0) {
 			modifiers |= 0x0001 // Shift
 		}
-		if getKeyState(VK_LCONTROL) < 0 || getKeyState(VK_RCONTROL) < 0 {
+		if !isCtrlKey && (getKeyState(VK_LCONTROL) < 0 || getKeyState(VK_RCONTROL) < 0) {
 			modifiers |= 0x0002 // Ctrl
 		}
-		if getKeyState(VK_LMENU) < 0 || getKeyState(VK_RMENU) < 0 {
+		if !isAltKey && (getKeyState(VK_LMENU) < 0 || getKeyState(VK_RMENU) < 0) {
 			modifiers |= 0x0004 // Alt
 		}
-		if getKeyState(VK_LWIN) < 0 || getKeyState(VK_RWIN) < 0 {
+		if !isWinKey && (getKeyState(VK_LWIN) < 0 || getKeyState(VK_RWIN) < 0) {
 			modifiers |= 0x0008 // Meta/Cmd
 		}
 
 		event := InputEvent{
 			Type:      "key",
-			KeyCode:   uint16(hookStruct.VkCode),
+			KeyCode:   uint16(vk),
 			Modifiers: modifiers,
+			Pressed:   pressed,
 			Timestamp: time.Now().UnixMilli(),
-		}
-
-		// WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101
-		// WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105
-		if msg == 0x0100 || msg == 0x0104 { // WM_KEYDOWN or WM_SYSKEYDOWN
-			event.Pressed = true
-		} else if msg == 0x0101 || msg == 0x0105 { // WM_KEYUP or WM_SYSKEYUP
-			event.Pressed = false
 		}
 
 		select {
@@ -907,11 +918,7 @@ func (t *Trap) keyboardHookProc(nCode int32, wParam uintptr, lParam uintptr) uin
 
 		// If capture mode is enabled, block input from reaching system
 		// Exception: Let hotkeys registered with RegisterHotKey still work
-		t.mu.Lock()
-		captureEnabled := t.captureEnabled
-		t.mu.Unlock()
-
-		if captureEnabled {
+		if atomic.LoadInt32(&t.captureEnabled) == 1 {
 			// Return 1 to block input
 			return 1
 		}

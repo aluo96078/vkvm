@@ -22,9 +22,10 @@ type WSClient struct {
 	reconnect chan struct{}
 
 	// Callbacks
-	OnSwitch func(profile string)
-	OnSync   func(profiles interface{}, usbForwardingEnabled bool)
-	OnInput  func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64)
+	OnSwitch              func(profile string)
+	OnSync                func(profiles interface{}, usbForwardingEnabled bool)
+	OnInput               func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64)
+	OnUSBForwardingUpdate func(enabled bool)
 
 	mu          sync.Mutex
 	isConnected bool
@@ -137,6 +138,20 @@ func (c *WSClient) writePump(conn *websocket.Conn) {
 				return
 			}
 
+			// Drain queued messages to reduce per-message overhead
+			n := len(c.send)
+			for i := 0; i < n; i++ {
+				qMsg := <-c.send
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				qJson, err := json.Marshal(qMsg)
+				if err != nil {
+					continue
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, qJson); err != nil {
+					return
+				}
+			}
+
 		case <-ticker.C:
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
@@ -184,6 +199,16 @@ func (c *WSClient) handleMessage(msg protocol.Message) {
 				payload.WheelDelta,
 				payload.Timestamp,
 			)
+		}
+
+	case protocol.TypeUSBForwardingUpdate:
+		var payload protocol.USBForwardingUpdatePayload
+		bytes, _ := json.Marshal(msg.Payload)
+		json.Unmarshal(bytes, &payload)
+
+		log.Printf("WS Client: Received USB forwarding update: %v", payload.Enabled)
+		if c.OnUSBForwardingUpdate != nil {
+			c.OnUSBForwardingUpdate(payload.Enabled)
 		}
 	}
 }

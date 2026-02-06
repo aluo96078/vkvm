@@ -167,9 +167,27 @@ func (c *WebSocketClient) writePump() {
 				return
 			}
 			w.Write(message)
-
 			if err := w.Close(); err != nil {
 				return
+			}
+
+			// Drain queued messages to reduce per-message overhead
+			// Each message is still a separate WebSocket frame but sent in rapid succession
+			n := len(c.send)
+			for i := 0; i < n; i++ {
+				msg, ok := <-c.send
+				if !ok {
+					return
+				}
+				c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				w2, err := c.conn.NextWriter(websocket.TextMessage)
+				if err != nil {
+					return
+				}
+				w2.Write(msg)
+				if err := w2.Close(); err != nil {
+					return
+				}
 			}
 
 		case <-ticker.C:
@@ -264,6 +282,17 @@ func (m *WSManager) BroadcastInput(eventType string, deltaX, deltaY int, button 
 			Modifiers:  modifiers,
 			WheelDelta: wheelDelta,
 			Timestamp:  timestamp,
+		},
+	}
+	m.broadcast <- msg
+}
+
+// Public method to broadcast USB forwarding setting changes from the Host to all Agents
+func (m *WSManager) BroadcastUSBForwarding(enabled bool) {
+	msg := protocol.Message{
+		Type: protocol.TypeUSBForwardingUpdate,
+		Payload: protocol.USBForwardingUpdatePayload{
+			Enabled: enabled,
 		},
 	}
 	m.broadcast <- msg

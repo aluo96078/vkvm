@@ -163,6 +163,9 @@ func runService(cfgMgr *config.Manager) {
 	// Input trap for host mode
 	var inputTrap *input.Trap
 
+	// UDP sender for host mode (low-latency binary input transport)
+	var udpSender *network.UDPSender
+
 	// Start API server if enabled
 	cfg := cfgMgr.Get()
 	var apiServer *api.Server
@@ -177,6 +180,13 @@ func runService(cfgMgr *config.Manager) {
 		}
 
 		apiServer = api.NewServer(cfgMgr, sw)
+
+		// Start UDP sender on same port (TCP and UDP can share port numbers)
+		udpSender = network.NewUDPSender(cfg.General.APIPort)
+		if err := udpSender.Start(); err != nil {
+			log.Printf("Warning: UDP sender failed to start: %v", err)
+			udpSender = nil
+		}
 
 		// Wire up switcher -> api broadcast for WebSocket
 		sw.SetOnSwitch(func(profileName string) {
@@ -198,6 +208,80 @@ func runService(cfgMgr *config.Manager) {
 				log.Printf("API server error: %v", err)
 			}
 		}()
+
+		// Watch for config changes to enable/disable USB forwarding (start/stop input capture)
+		cfgMgr.RegisterChangeCallback(func() {
+			cfg := cfgMgr.Get()
+			// Only act on Host role changes
+			if cfg.General.Role == "host" {
+				if !cfg.General.USBForwardingEnabled {
+					if inputTrap != nil {
+						log.Printf("Config: USB forwarding disabled via config, stopping input capture")
+						inputTrap.Stop()
+						inputTrap = nil
+					}
+				} else {
+					// USB forwarding enabled: ensure input trap exists and is started
+					if inputTrap == nil {
+						log.Printf("Config: USB forwarding enabled via config, starting input capture")
+						inputTrap = input.NewTrap()
+						log.Printf("Host mode: AgentProfile='%s'", cfg.General.AgentProfile)
+
+						// Enable capture only when current profile matches AgentProfile
+						// (same logic as initial startup — do NOT capture when Host is the active display)
+						if cfg.General.AgentProfile != "" {
+							detectedProfile, err := sw.DetectActiveProfile()
+							if err == nil && detectedProfile == cfg.General.AgentProfile {
+								log.Printf("Config callback: detected profile '%s' matches agent profile, enabling capture", detectedProfile)
+								inputTrap.EnableCapture(true)
+							} else {
+								// Current profile is NOT the agent — don't capture input on Host
+								log.Printf("Config callback: detected profile '%s' does not match agent profile '%s', capture disabled (will auto-enable on profile switch)", detectedProfile, cfg.General.AgentProfile)
+								inputTrap.EnableCapture(false)
+							}
+						} else if cfg.General.InputCaptureEnabled {
+							log.Printf("Config callback: No agent profile set, using InputCaptureEnabled=true")
+							inputTrap.EnableCapture(true)
+						} else {
+							// No agent profile and InputCaptureEnabled is false — don't capture
+							log.Printf("Config callback: No agent profile set and InputCaptureEnabled=false, capture disabled")
+							inputTrap.EnableCapture(false)
+						}
+
+						if err := inputTrap.Start(); err == nil {
+							// Broadcast captured events to agents
+							go func() {
+								for event := range inputTrap.Events() {
+									// Primary path: UDP for low latency
+									if udpSender != nil && udpSender.HasAgents() {
+										udpSender.SendInput(
+											event.Type,
+											event.DeltaX, event.DeltaY,
+											event.Button, event.Pressed,
+											event.KeyCode, event.Modifiers,
+											event.WheelDelta,
+											event.Timestamp,
+										)
+									} else if apiServer != nil {
+										// Fallback: WebSocket only when no UDP agents
+										apiServer.BroadcastInput(
+											event.Type,
+											event.DeltaX, event.DeltaY,
+											event.Button, event.Pressed,
+											event.KeyCode, event.Modifiers,
+											event.WheelDelta,
+											event.Timestamp,
+										)
+									}
+								}
+							}()
+						} else {
+							log.Printf("Config callback: Failed to start input trap: %v", err)
+						}
+					}
+				}
+			}
+		})
 	}
 
 	// Hotkey manager
@@ -249,12 +333,11 @@ func runService(cfgMgr *config.Manager) {
 		// Set up WebSocket client for agent
 		wsClient = network.NewWSClient(cfg.General.CoordinatorAddr, cfg.General.APIToken)
 
-		// Set up event handler for received input events
-		wsClient.OnInput = func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64) {
+		// Shared input handler for both UDP and WebSocket paths
+		handleInput := func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64) {
 			// Check if USB forwarding is enabled from Host config
 			currentCfg := cfgMgr.Get()
 			if !currentCfg.General.USBForwardingEnabled {
-				// USB forwarding disabled by Host, ignore input
 				return
 			}
 
@@ -264,7 +347,6 @@ func runService(cfgMgr *config.Manager) {
 			injectionMutex.Unlock()
 
 			if !shouldInject {
-				// Silently ignore input when not displaying this agent
 				return
 			}
 
@@ -283,6 +365,8 @@ func runService(cfgMgr *config.Manager) {
 			}
 		}
 
+		// Note: wsClient.OnInput will be set as fallback only if UDP receiver fails to start (see below)
+
 		// Set up switch event handler to control injection based on active profile
 		wsClient.OnSwitch = func(profile string) {
 			injectionMutex.Lock()
@@ -298,6 +382,22 @@ func runService(cfgMgr *config.Manager) {
 		}
 
 		wsClient.Start()
+
+		// Probe UDP connectivity before committing to it
+		udpRecv := network.NewUDPReceiver(cfg.General.CoordinatorAddr)
+		if udpRecv.Probe() {
+			udpRecv.OnInput = handleInput
+			if err := udpRecv.Start(); err != nil {
+				log.Printf("Warning: UDP receiver start failed after probe: %v (falling back to WebSocket)", err)
+				wsClient.OnInput = handleInput
+			} else {
+				log.Printf("Agent: UDP probe succeeded, input events will arrive via UDP")
+				wsClient.OnInput = nil
+			}
+		} else {
+			log.Printf("Agent: UDP probe failed (blocked/unreachable), using WebSocket for input")
+			wsClient.OnInput = handleInput
+		}
 	} else if cfg.General.Role == "host" {
 		// Check administrator privileges on Windows
 		if runtime.GOOS == "windows" {
@@ -333,8 +433,18 @@ func runService(cfgMgr *config.Manager) {
 				// Process captured events and broadcast to all connected agents
 				go func() {
 					for event := range inputTrap.Events() {
-						// Broadcast input event to all connected agents via API server
-						if apiServer != nil {
+						// Primary path: send via UDP for low latency
+						if udpSender != nil && udpSender.HasAgents() {
+							udpSender.SendInput(
+								event.Type,
+								event.DeltaX, event.DeltaY,
+								event.Button, event.Pressed,
+								event.KeyCode, event.Modifiers,
+								event.WheelDelta,
+								event.Timestamp,
+							)
+						} else if apiServer != nil {
+							// Fallback: WebSocket only when no UDP agents
 							apiServer.BroadcastInput(
 								event.Type,
 								event.DeltaX, event.DeltaY,

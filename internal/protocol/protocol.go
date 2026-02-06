@@ -21,6 +21,9 @@ const (
 
 	// TypeInput is sent to transmit keyboard and mouse input events
 	TypeInput MessageType = "input"
+
+	// TypeUSBForwardingUpdate is sent to notify USB forwarding setting changes
+	TypeUSBForwardingUpdate MessageType = "usb_forwarding_update"
 )
 
 // Message is the generic container for all WebSocket messages
@@ -60,4 +63,9 @@ type InputPayload struct {
 	Modifiers  uint16 `json:"modifiers,omitempty"`
 	WheelDelta int    `json:"wheel_delta,omitempty"` // Positive=up/right, Negative=down/left
 	Timestamp  int64  `json:"ts"`                    // Unix ms timestamp
+}
+
+// USBForwardingUpdatePayload is the payload for TypeUSBForwardingUpdate
+type USBForwardingUpdatePayload struct {
+	Enabled bool `json:"enabled"`
 }
