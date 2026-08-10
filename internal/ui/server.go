@@ -3,19 +3,24 @@ package ui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"time"
 
+	"vkvm/internal/autostart"
 	"vkvm/internal/config"
 	"vkvm/internal/ddc"
+	"vkvm/internal/input"
 	"vkvm/internal/network"
 	"vkvm/internal/osutils"
 	"vkvm/internal/switcher"
@@ -49,6 +54,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/sync-to", s.handleSyncTo)
 	mux.HandleFunc("/api/sleep-display", s.handleSleepDisplay)
 	mux.HandleFunc("/api/connection-status", s.handleConnectionStatus)
+	mux.HandleFunc("/api/permissions", s.handlePermissions)
+	mux.HandleFunc("/api/autostart", s.handleAutostart)
 
 	// Find an available port
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -65,7 +72,7 @@ func (s *Server) Start() error {
 	// Open browser
 	go openBrowser(url)
 
-	return http.Serve(listener, mux)
+	return http.Serve(listener, csrfMiddleware(mux))
 }
 
 // Stop stops the UI server
@@ -117,25 +124,57 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
-		json.NewEncoder(w).Encode(s.configMgr.Get())
+		cfg := s.configMgr.Get()
+		cfg.General.APIToken = ""
+		cfg.General.IdentityPrivateKey = ""
+		json.NewEncoder(w).Encode(cfg)
 	case "POST":
 		var cfg config.Config
-		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err := decoder.Decode(&cfg); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		var extra interface{}
+		if err := decoder.Decode(&extra); err != io.EOF {
+			http.Error(w, "invalid configuration data", http.StatusBadRequest)
+			return
+		}
+		current := s.configMgr.Get()
+		if cfg.General.APIToken == "" {
+			cfg.General.APIToken = current.General.APIToken
+		}
+		if cfg.General.IdentityPublicKey == "" {
+			cfg.General.IdentityPublicKey = current.General.IdentityPublicKey
+		}
+		if cfg.General.IdentityPrivateKey == "" {
+			cfg.General.IdentityPrivateKey = current.General.IdentityPrivateKey
+		}
+		if cfg.General.APIEnabled && cfg.General.APIToken == "" {
+			http.Error(w, "api_token is required when api_enabled is true", http.StatusBadRequest)
+			return
+		}
+		change := config.ClassifyChange(current, &cfg)
 		s.configMgr.Set(&cfg)
 		if err := s.configMgr.Save(); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":              "ok",
+			"applied_immediately": change.Immediate,
+			"restart_required":    change.RestartRequired,
+		})
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func (s *Server) handleSwitch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	profileName := r.URL.Query().Get("profile")
 	if profileName == "" {
 		http.Error(w, "Missing profile parameter", http.StatusBadRequest)
@@ -155,6 +194,10 @@ func (s *Server) handleSwitch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	monitorID := r.URL.Query().Get("monitor")
 	inputStr := r.URL.Query().Get("input")
 
@@ -175,7 +218,9 @@ func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUIDiscover(w http.ResponseWriter, r *http.Request) {
 	cfg := s.configMgr.Get()
-	hosts, err := network.ScanLAN(cfg.General.APIPort)
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	hosts, err := network.DiscoverVKVM(ctx, cfg.General.APIPort)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -187,19 +232,28 @@ func (s *Server) handleUIDiscover(w http.ResponseWriter, r *http.Request) {
 
 // handleTestRemote tests connectivity to a remote VKVM instance
 func (s *Server) handleTestRemote(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	addr := r.URL.Query().Get("addr")
 	if addr == "" {
 		http.Error(w, "Missing addr", http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("UI: Testing remote host %s", addr)
+	validatedAddr, err := validateRemoteAddress(addr)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	log.Printf("UI: Testing remote host %s", validatedAddr)
 
 	client := &http.Client{
 		Timeout: 2 * time.Second,
 	}
 
-	resp, err := client.Get("http://" + addr + "/health")
+	resp, err := client.Get("http://" + validatedAddr + "/health")
 	if err != nil {
 		log.Printf("UI: Test failed: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -218,6 +272,10 @@ func (s *Server) handleTestRemote(w http.ResponseWriter, r *http.Request) {
 
 // handleSleepDisplay turns off the display
 func (s *Server) handleSleepDisplay(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	log.Printf("UI: Requested display sleep")
 	if err := osutils.TurnOffDisplay(); err != nil {
 		log.Printf("Display sleep failed: %v", err)
@@ -230,15 +288,29 @@ func (s *Server) handleSleepDisplay(w http.ResponseWriter, r *http.Request) {
 
 // handleSyncTo pushes local config to a remote VKVM instance
 func (s *Server) handleSyncTo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	addr := r.URL.Query().Get("addr")
 	if addr == "" {
 		http.Error(w, "Missing addr", http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("UI: Syncing local config to %s", addr)
+	validatedAddr, err := validateRemoteAddress(addr)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	log.Printf("UI: Syncing local config to %s", validatedAddr)
 
 	cfg := s.configMgr.Get()
+	// Never send the local API secret as part of a configuration sync.
+	cfg.General.APIToken = ""
+	// The identity private key is local-only; the peer only needs its public key
+	// through an explicit pairing operation.
+	cfg.General.IdentityPrivateKey = ""
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		http.Error(w, "Failed to encode config", http.StatusInternalServerError)
@@ -247,7 +319,10 @@ func (s *Server) handleSyncTo(w http.ResponseWriter, r *http.Request) {
 
 	// Create request to target machine's Remote API
 	token := r.URL.Query().Get("token")
-	targetURL := fmt.Sprintf("http://%s/api/config", addr)
+	if token == "" {
+		token = s.configMgr.Get().General.APIToken
+	}
+	targetURL := fmt.Sprintf("http://%s/api/config", validatedAddr)
 
 	req, err := http.NewRequest("POST", targetURL, bytes.NewBuffer(data))
 	if err != nil {
@@ -279,10 +354,102 @@ func (s *Server) handleSyncTo(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleConnectionStatus(w http.ResponseWriter, r *http.Request) {
 	connected := s.switcher.IsConnectedToCheck()
+	state := s.switcher.AgentTransportState()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"connected": connected,
+		"state":     state,
 	})
+}
+
+func (s *Server) handlePermissions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(input.CurrentPermissions())
+}
+
+func (s *Server) handleAutostart(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"enabled": autostart.IsEnabled(), "requested": s.configMgr.Get().General.StartOnBoot})
+	case http.MethodPost:
+		var request struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&request); err != nil {
+			http.Error(w, "invalid autostart request", http.StatusBadRequest)
+			return
+		}
+		var err error
+		if request.Enabled {
+			err = autostart.Enable()
+		} else {
+			err = autostart.Disable()
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		cfg := s.configMgr.Get()
+		cfg.General.StartOnBoot = request.Enabled
+		s.configMgr.Set(cfg)
+		if err := s.configMgr.Save(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "enabled": autostart.IsEnabled()})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func csrfMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodPatch {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				origin = r.Header.Get("Referer")
+			}
+			u, err := url.Parse(origin)
+			if err != nil || u.Host == "" || u.Host != r.Host || (u.Scheme != "http" && u.Scheme != "https") {
+				http.Error(w, "CSRF validation failed", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func validateRemoteAddress(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host == "" || port == "" {
+		return "", fmt.Errorf("addr must be an explicit host:port")
+	}
+	parsedPort, err := strconv.Atoi(port)
+	if err != nil || parsedPort < 1 || parsedPort > 65535 {
+		return "", fmt.Errorf("invalid remote port")
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return "", fmt.Errorf("remote host must be a numeric IP address")
+	}
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() {
+		return "", fmt.Errorf("remote host is not an allowed LAN address")
+	}
+	if !ip.IsPrivate() && !ip.IsLinkLocalUnicast() && !isSharedAddress(ip) {
+		return "", fmt.Errorf("remote host must be on a private, link-local, or shared LAN")
+	}
+	return net.JoinHostPort(ip.String(), strconv.Itoa(parsedPort)), nil
+}
+
+func isSharedAddress(ip net.IP) bool {
+	ip = ip.To4()
+	return ip != nil && ip[0] == 100 && ip[1] >= 64 && ip[1] <= 127
 }
 
 var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
@@ -592,6 +759,16 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
         let config = null;
         let monitors = [];
 
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, ch => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[ch]));
+        }
+
+        function jsArg(value) {
+            return escapeHtml(JSON.stringify(String(value ?? '')));
+        }
+
         async function loadData() {
             try {
                 const [cfgRes, monRes] = await Promise.all([
@@ -636,6 +813,11 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                     el.style.color = '#34d399';
                     el.style.border = '1px solid rgba(16, 185, 129, 0.3)';
                     el.innerHTML = '✅ Connected to Host';
+                } else if (data.state === 'waiting_for_network_change') {
+                    el.style.background = 'rgba(245, 158, 11, 0.2)';
+                    el.style.color = '#fbbf24';
+                    el.style.border = '1px solid rgba(245, 158, 11, 0.3)';
+                    el.innerHTML = '⏸ Waiting for network change';
                 } else {
                     el.style.background = 'rgba(239, 68, 68, 0.2)';
                     el.style.color = '#f87171';
@@ -715,12 +897,12 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             container.innerHTML = config.profiles.map((profile, idx) => ` + "`" + `
                 <div class="profile-item" style="${isAgent ? 'opacity: 0.8;' : ''}">
                     <div class="profile-header">
-                        <input type="text" class="profile-name" value="${profile.name}" 
+                        <input type="text" class="profile-name" value="${escapeHtml(profile.name)}"
                                ${isAgent ? 'disabled' : ''}
                                onchange="updateProfileName(${idx}, this.value)" 
                                style="background: transparent; border: none; font-size: 1.1rem; font-weight: 600; color: #e2e8f0; width: 200px;">
                         <div class="action-btns">
-                            <button class="btn btn-small btn-secondary" onclick="switchToProfile('${profile.name}')">Switch</button>
+                            <button class="btn btn-small btn-secondary" onclick="switchToProfile(${jsArg(profile.name)})">Switch</button>
                             ${isAgent ? '' : "<button class=\"btn btn-small btn-danger\" onclick=\"deleteProfile(${idx})\">Delete</button>"}
                         </div>
                     </div>
@@ -728,13 +910,13 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                         <div class="input-group">
                             <label>Hotkey:</label>
                             <div style="display: flex; gap: 0.5rem;">
-                                <input type="text" id="hotkey-${idx}" value="${profile.hotkey || ''}" 
+                                <input type="text" id="hotkey-${idx}" value="${escapeHtml(profile.hotkey || '')}"
                                        ${isAgent ? 'disabled' : ''}
                                        onchange="updateProfileHotkey(${idx}, this.value)"
                                        placeholder="Ctrl+Alt+1" style="flex: 1;">
                                 ${isAgent ? '' : "<button class=\"btn btn-small\" style=\"background: #ef4444;\" onclick=\"startRecording(" + idx + ")\">🔴 Record</button>"}
                             </div>
-                            ${(profile.hotkey && profile.hotkey.toUpperCase().includes('CTRL')) ? '<div style="font-size: 0.75rem; color: #a5b4fc; margin-top: 0.25rem;">⌘ On macOS: ' + profile.hotkey.toUpperCase().replace(/CTRL/g, 'Cmd') + '</div>' : ''}
+                            ${(profile.hotkey && profile.hotkey.toUpperCase().includes('CTRL')) ? '<div style="font-size: 0.75rem; color: #a5b4fc; margin-top: 0.25rem;">⌘ On macOS: ' + escapeHtml(profile.hotkey.toUpperCase().replace(/CTRL/g, 'Cmd')) + '</div>' : ''}
                         </div>
                         <div class="input-group">
                             <label>Switch Mode:</label>
@@ -754,8 +936,8 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                         <div class="monitor-inputs">
                             ${monitors.map(m => ` + "`" + `
                                 <div class="input-group">
-                                    <label>${(m.name && m.name.length>0) ? (m.name + (m.device_name ? ' ('+m.device_name+')' : '')) : (m.device_name || m.id)}:</label>
-                                    <select data-profile-idx="${idx}" data-monitor-id="${m.id}" onchange="updateProfileMonitorInput(this)">
+                                    <label>${escapeHtml((m.name && m.name.length>0) ? (m.name + (m.device_name ? ' ('+m.device_name+')' : '')) : (m.device_name || m.id))}:</label>
+                                    <select data-profile-idx="${idx}" data-monitor-id="${escapeHtml(m.id)}" onchange="updateProfileMonitorInput(this)">
                                         <option value="">-</option>
                                         <option value="15" ${(profile.monitor_inputs && profile.monitor_inputs[m.id]==15)?'selected':''}>DP1</option>
                                         <option value="16" ${(profile.monitor_inputs && profile.monitor_inputs[m.id]==16)?'selected':''}>DP2</option>
@@ -786,7 +968,7 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                 <div style="padding: 0.75rem; background: rgba(255,255,255,0.03); border-radius: 8px; margin-bottom: 0.5rem;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
                         <div>
-                            <strong>${(m.name && m.name.length>0) ? m.name : (m.device_name || m.id)}</strong> <span style="color: #94a3b8; font-size: 0.875rem;">${(m.name && m.name.length>0 && m.device_name) ? ' ('+m.device_name+')' : ' (ID: '+m.id+')'}</span>
+                            <strong>${escapeHtml((m.name && m.name.length>0) ? m.name : (m.device_name || m.id))}</strong> <span style="color: #94a3b8; font-size: 0.875rem;">${escapeHtml((m.name && m.name.length>0 && m.device_name) ? ' ('+m.device_name+')' : ' (ID: '+m.id+')')}</span>
                         </div>
                         <div style="font-size: 0.875rem;">
                             ${m.ddc_supported 
@@ -796,7 +978,7 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                     </div>
                     ${m.input_source ? ` + "`" + `
                         <div style="font-size: 0.875rem; color: #a5b4fc;">
-                            Current Input: <strong>${inputNames[m.input_source] || 'Unknown (0x' + m.input_source.toString(16) + ')'}</strong>
+                            Current Input: <strong>${escapeHtml(inputNames[m.input_source] || 'Unknown (0x' + m.input_source.toString(16) + ')')}</strong>
                         </div>
                     ` + "`" + ` : ''}
                 </div>
@@ -853,17 +1035,17 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                 container.innerHTML = hosts.map(h => ` + "`" + `
                     <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem; background: rgba(255,255,255,0.03); border-radius: 8px; margin-bottom: 0.5rem;">
                         <div>
-                            <strong>${h.ip}</strong> <span style="color: #94a3b8;">(Port: ${h.port})</span>
-                            <div style="font-size: 0.8rem; color: #a5b4fc;">Profile: ${h.current_profile || 'None'}</div>
+                            <strong>${escapeHtml(h.ip)}</strong> <span style="color: #94a3b8;">(Port: ${escapeHtml(h.port)})</span>
+                            <div style="font-size: 0.8rem; color: #a5b4fc;">Profile: ${escapeHtml(h.current_profile || 'None')}</div>
                         </div>
                         <div style="display: flex; gap: 0.5rem; align-items: center;">
-                            <button class="btn btn-small btn-secondary" onclick="addRemoteFromDiscovery('${h.ip}:${h.port}')">Add as Remote</button>
-                            <button class="btn btn-small" style="background: #4f46e5;" onclick="syncConfigTo('${h.ip}:${h.port}')">☁️ Sync Config</button>
+                            <button class="btn btn-small btn-secondary" onclick="addRemoteFromDiscovery(${jsArg(h.ip + ':' + h.port)})">Add as Remote</button>
+                            <button class="btn btn-small" style="background: #4f46e5;" onclick="syncConfigTo(${jsArg(h.ip + ':' + h.port)})">☁️ Sync Config</button>
                         </div>
                     </div>
                 ` + "`" + `).join('');
             } catch (e) {
-                container.innerHTML = '<p style="color: #f87171;">Scan failed: ' + e.message + '</p>';
+                container.innerHTML = '<p style="color: #f87171;">Scan failed: ' + escapeHtml(e.message) + '</p>';
             }
         }
 
@@ -875,7 +1057,7 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             showStatus('Syncing config to ' + addr + '...');
             try {
                 // We pass empty token for now, or might need to ask user if target has token
-                const res = await fetch('/api/sync-to?addr=' + encodeURIComponent(addr));
+                const res = await fetch('/api/sync-to?addr=' + encodeURIComponent(addr), {method: 'POST'});
                 if (res.ok) {
                     showStatus('Config successfully synced to ' + addr);
                 } else {
@@ -928,7 +1110,7 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
 
         async function switchToProfile(name) {
             try {
-                const res = await fetch('/api/switch?profile=' + encodeURIComponent(name));
+                const res = await fetch('/api/switch?profile=' + encodeURIComponent(name), {method: 'POST'});
                 if (!res.ok) throw new Error('Switch failed');
                 showStatus('Switched to ' + name);
             } catch (e) {

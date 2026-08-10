@@ -5,6 +5,7 @@ package input
 import (
 	"fmt"
 	"log"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -17,7 +18,7 @@ import (
 // Trap represents a Windows input trap
 type Trap struct {
 	hwnd           syscall.Handle
-	events         chan InputEvent
+	eventBuffer    *EventBuffer
 	running        bool
 	mu             sync.Mutex
 	killSwitch     func()
@@ -28,6 +29,10 @@ type Trap struct {
 	lastMouseX     int32
 	lastMouseY     int32
 	captureEnabled int32 // atomic: 1=enabled, 0=disabled
+	runningState   int32
+	threadReady    chan error
+	threadDone     chan struct{}
+	pressedScans   map[uint16]struct{}
 }
 
 // Windows API constants and types
@@ -76,6 +81,7 @@ const (
 	WM_MOUSEHWHEEL         = 0x020E
 	WM_XBUTTONDOWN         = 0x020B
 	WM_XBUTTONUP           = 0x020C
+	WM_CLOSE               = 0x0010
 	XBUTTON1               = 0x0001
 	XBUTTON2               = 0x0002
 	CW_USEDEFAULT          = 0x80000000
@@ -117,6 +123,8 @@ var (
 	GetSystemMetrics           = user32.NewProc("GetSystemMetrics")
 	GetClientRect              = user32.NewProc("GetClientRect")
 	PostQuitMessage            = user32.NewProc("PostQuitMessage")
+	PostMessage                = user32.NewProc("PostMessageW")
+	DestroyWindow              = user32.NewProc("DestroyWindow")
 	SystemParametersInfo       = user32.NewProc("SystemParametersInfoW")
 	GetModuleHandle            = kernel32.NewProc("GetModuleHandleW")
 )
@@ -213,42 +221,42 @@ type RAWINPUT struct {
 // NewTrap creates a new input trap for Windows
 func NewTrap() *Trap {
 	return &Trap{
-		events:     make(chan InputEvent, 1000), // Increased buffer size
-		cursorX:    0,
-		cursorY:    0,
-		lastMouseX: -1,
-		lastMouseY: -1,
+		eventBuffer:  NewEventBuffer(4096),
+		cursorX:      0,
+		cursorY:      0,
+		lastMouseX:   -1,
+		lastMouseY:   -1,
+		pressedScans: make(map[uint16]struct{}),
 	}
 }
 
 // Start begins capturing input
 func (t *Trap) Start() error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	if t.running {
+		t.mu.Unlock()
 		return fmt.Errorf("trap already running")
 	}
-
-	// Create window for hotkey registration
-	if err := t.createWindow(); err != nil {
-		return fmt.Errorf("failed to create window: %w", err)
-	}
-
-	// Register kill switch hotkey (Ctrl+Alt+Esc)
-	if err := t.registerKillSwitch(); err != nil {
-		return fmt.Errorf("failed to register kill switch: %w", err)
-	}
-
-	// Install low-level hooks for input capture and blocking
-	if err := t.installHooks(); err != nil {
-		return fmt.Errorf("failed to install hooks: %w", err)
-	}
-
 	t.running = true
+	atomic.StoreInt32(&t.runningState, 1)
+	if t.eventBuffer != nil {
+		t.eventBuffer.Close()
+	}
+	t.eventBuffer = NewEventBuffer(4096)
+	t.pressedScans = make(map[uint16]struct{})
+	t.threadReady = make(chan error, 1)
+	t.threadDone = make(chan struct{})
+	ready := t.threadReady
+	go t.captureThread()
+	t.mu.Unlock()
 
-	// Start message loop thread
-	go t.messageLoop()
+	if err := <-ready; err != nil {
+		t.mu.Lock()
+		t.running = false
+		atomic.StoreInt32(&t.runningState, 0)
+		t.mu.Unlock()
+		return err
+	}
 
 	return nil
 }
@@ -256,39 +264,37 @@ func (t *Trap) Start() error {
 // Stop stops capturing input
 func (t *Trap) Stop() error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	if !t.running {
+		t.mu.Unlock()
 		return nil
 	}
+	hwnd := t.hwnd
+	done := t.threadDone
+	t.mu.Unlock()
 
-	t.running = false
-
-	// Release cursor clipping
-	ClipCursor.Call(0) // NULL rect releases clipping
-
-	// Unregister hotkey
-	UnregisterHotKey.Call(uintptr(t.hwnd), 1)
-
-	// Unhook input hooks
-	if t.mouseHook != 0 {
-		UnhookWindowsHookEx.Call(uintptr(t.mouseHook))
-		t.mouseHook = 0
+	atomic.StoreInt32(&t.captureEnabled, 0)
+	if hwnd != 0 {
+		PostMessage.Call(uintptr(hwnd), WM_CLOSE, 0, 0)
 	}
-	if t.keyHook != 0 {
-		UnhookWindowsHookEx.Call(uintptr(t.keyHook))
-		t.keyHook = 0
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			return fmt.Errorf("timed out waiting for input thread to stop")
+		}
 	}
-
-	// Close events channel
-	close(t.events)
-
 	return nil
 }
 
 // Events returns the input event channel
 func (t *Trap) Events() <-chan InputEvent {
-	return t.events
+	t.mu.Lock()
+	buffer := t.eventBuffer
+	t.mu.Unlock()
+	if buffer == nil {
+		return nil
+	}
+	return buffer.Events()
 }
 
 // SetKillSwitch registers Ctrl+Alt+Esc to release control
@@ -373,25 +379,71 @@ func (t *Trap) createWindow() error {
 	return nil
 }
 
-// messageLoop runs the Windows message loop
-func (t *Trap) messageLoop() {
+// captureThread owns all Windows input resources and their message queue on
+// one locked OS thread. The caller waits for threadReady before forwarding
+// events, so a partially initialized trap cannot be used.
+func (t *Trap) captureThread() {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	defer close(t.threadDone)
+
+	if err := t.createWindow(); err != nil {
+		t.threadReady <- fmt.Errorf("failed to create window: %w", err)
+		return
+	}
+	if err := t.registerKillSwitch(); err != nil {
+		t.threadReady <- fmt.Errorf("failed to register kill switch: %w", err)
+		t.cleanupThread()
+		return
+	}
+	if err := t.registerRawInput(); err != nil {
+		t.threadReady <- fmt.Errorf("failed to register raw input: %w", err)
+		t.cleanupThread()
+		return
+	}
+	if err := t.installHooks(); err != nil {
+		t.threadReady <- fmt.Errorf("failed to install hooks: %w", err)
+		t.cleanupThread()
+		return
+	}
+	t.threadReady <- nil
+
 	var msg MSG
-
-	for t.running {
-		// Use PeekMessage to check for messages without blocking
-		ret, _, _ := PeekMessage.Call(
-			uintptr(unsafe.Pointer(&msg)),
-			0, 0, 0, 1, // PM_REMOVE = 1
-		)
-
-		if int32(ret) != 0 {
-			// We have a message
-			TranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
-			DispatchMessage.Call(uintptr(unsafe.Pointer(&msg)))
-		} else {
-			// No message, sleep briefly to avoid busy loop while keeping latency low
-			time.Sleep(1 * time.Millisecond)
+	for atomic.LoadInt32(&t.runningState) == 1 {
+		ret, _, _ := GetMessage.Call(uintptr(unsafe.Pointer(&msg)), 0, 0, 0)
+		if int32(ret) <= 0 {
+			break
 		}
+		TranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
+		DispatchMessage.Call(uintptr(unsafe.Pointer(&msg)))
+	}
+	t.cleanupThread()
+}
+
+func (t *Trap) cleanupThread() {
+	atomic.StoreInt32(&t.runningState, 0)
+	ClipCursor.Call(0)
+	if t.hwnd != 0 {
+		UnregisterHotKey.Call(uintptr(t.hwnd), 1)
+	}
+	if t.mouseHook != 0 {
+		UnhookWindowsHookEx.Call(uintptr(t.mouseHook))
+		t.mouseHook = 0
+	}
+	if t.keyHook != 0 {
+		UnhookWindowsHookEx.Call(uintptr(t.keyHook))
+		t.keyHook = 0
+	}
+	t.mu.Lock()
+	t.running = false
+	hwnd := t.hwnd
+	t.hwnd = 0
+	if t.eventBuffer != nil {
+		t.eventBuffer.Close()
+	}
+	t.mu.Unlock()
+	if hwnd != 0 {
+		DestroyWindow.Call(uintptr(hwnd))
 	}
 }
 
@@ -509,17 +561,25 @@ func getKeyState(vk uint32) int16 {
 // windowProc handles window messages
 func (t *Trap) windowProc(hwnd syscall.Handle, msg uint32, wparam uintptr, lparam uintptr) uintptr {
 	switch msg {
+	case WM_CLOSE:
+		PostQuitMessage.Call(0)
+		return 0
 	case WM_INPUT:
 		t.handleRawInput(lparam)
 		return 0
 	case WM_INPUT_DEVICE_CHANGE:
 		return 0
 	case WM_HOTKEY:
-		if t.killSwitch != nil {
-			t.killSwitch()
+		t.mu.Lock()
+		callback := t.killSwitch
+		t.mu.Unlock()
+		if callback != nil {
+			// Stop waits for this message loop to exit; never call it inline
+			// from the window procedure.
+			go callback()
+		} else {
+			PostMessage.Call(uintptr(hwnd), WM_CLOSE, 0, 0)
 		}
-		// Also stop the trap automatically
-		t.Stop()
 		return 0
 	}
 
@@ -534,6 +594,11 @@ func (t *Trap) windowProc(hwnd syscall.Handle, msg uint32, wparam uintptr, lpara
 
 // handleRawInput processes raw input data
 func (t *Trap) handleRawInput(lparam uintptr) {
+	// Raw Input is the event source for forwarding. Do not queue events while
+	// capture is disabled; the low-level hooks below only block input then.
+	if atomic.LoadInt32(&t.captureEnabled) != 1 {
+		return
+	}
 	var size uint32 = 0
 
 	// Get the size of the raw input data (first call with NULL data pointer)
@@ -567,125 +632,133 @@ func (t *Trap) handleRawInput(lparam uintptr) {
 	rawInput := (*RAWINPUT)(unsafe.Pointer(&data[0]))
 
 	if rawInput.Header.DwType == RIM_TYPEMOUSE {
-		t.handleMouseInput(&rawInput.Mouse)
+		t.handleMouseInput(&rawInput.Mouse, rawHardwareID(rawInput.Header.HDevice))
 	} else if rawInput.Header.DwType == RIM_TYPEKEYBOARD {
 		// Access keyboard data from the union
 		keyboard := (*RAWKEYBOARD)(unsafe.Pointer(&rawInput.Mouse))
-		t.handleKeyboardInput(keyboard)
+		t.handleKeyboardInput(keyboard, rawHardwareID(rawInput.Header.HDevice))
 	}
 }
 
+func rawHardwareID(device syscall.Handle) string {
+	if device == 0 {
+		return "hid-default"
+	}
+	return fmt.Sprintf("hid-%x", uintptr(device))
+}
+
 // handleMouseInput processes mouse input events
-func (t *Trap) handleMouseInput(mouse *RAWMOUSE) {
+func (t *Trap) handleMouseInput(mouse *RAWMOUSE, hardwareID string) {
 	// Handle mouse movement (only if there's actual movement)
 	if mouse.LLastX != 0 || mouse.LLastY != 0 {
 		event := InputEvent{
-			Type:      "mouse_move",
-			DeltaX:    int(mouse.LLastX),
-			DeltaY:    int(mouse.LLastY),
-			Timestamp: time.Now().UnixMilli(),
+			Type:       "mouse_move",
+			DeltaX:     int(mouse.LLastX),
+			DeltaY:     int(mouse.LLastY),
+			Timestamp:  time.Now().UnixMilli(),
+			ClockNS:    time.Now().UnixNano(),
+			HardwareID: hardwareID,
 		}
 
 		// Update virtual cursor position (for relative movement)
 		t.cursorX += event.DeltaX
 		t.cursorY += event.DeltaY
 
-		select {
-		case t.events <- event:
-		default:
-			// Channel full, drop event
-		}
+		t.enqueueEvent(event, false)
 	}
 
 	// Handle mouse buttons (separate events)
 	if mouse.UsButtonFlags&0x0001 != 0 { // RI_MOUSE_LEFT_BUTTON_DOWN
-		event := InputEvent{
-			Type:      "mouse_btn",
-			Button:    1,
-			Pressed:   true,
-			Timestamp: time.Now().UnixMilli(),
-		}
-		select {
-		case t.events <- event:
-		default:
-		}
-	} else if mouse.UsButtonFlags&0x0002 != 0 { // RI_MOUSE_LEFT_BUTTON_UP
-		event := InputEvent{
-			Type:      "mouse_btn",
-			Button:    1,
-			Pressed:   false,
-			Timestamp: time.Now().UnixMilli(),
-		}
-		select {
-		case t.events <- event:
-		default:
-		}
-	} else if mouse.UsButtonFlags&0x0004 != 0 { // RI_MOUSE_RIGHT_BUTTON_DOWN
-		event := InputEvent{
-			Type:      "mouse_btn",
-			Button:    2,
-			Pressed:   true,
-			Timestamp: time.Now().UnixMilli(),
-		}
-		select {
-		case t.events <- event:
-		default:
-		}
-	} else if mouse.UsButtonFlags&0x0008 != 0 { // RI_MOUSE_RIGHT_BUTTON_UP
-		event := InputEvent{
-			Type:      "mouse_btn",
-			Button:    2,
-			Pressed:   false,
-			Timestamp: time.Now().UnixMilli(),
-		}
-		select {
-		case t.events <- event:
-		default:
-		}
-	} else if mouse.UsButtonFlags&0x0010 != 0 { // RI_MOUSE_MIDDLE_BUTTON_DOWN
-		event := InputEvent{
-			Type:      "mouse_btn",
-			Button:    3,
-			Pressed:   true,
-			Timestamp: time.Now().UnixMilli(),
-		}
-		select {
-		case t.events <- event:
-		default:
-		}
-	} else if mouse.UsButtonFlags&0x0020 != 0 { // RI_MOUSE_MIDDLE_BUTTON_UP
-		event := InputEvent{
-			Type:      "mouse_btn",
-			Button:    3,
-			Pressed:   false,
-			Timestamp: time.Now().UnixMilli(),
-		}
-		select {
-		case t.events <- event:
-		default:
+		t.enqueueMouseButton(1, true, hardwareID)
+	}
+	if mouse.UsButtonFlags&0x0002 != 0 {
+		t.enqueueMouseButton(1, false, hardwareID)
+	}
+	if mouse.UsButtonFlags&0x0004 != 0 {
+		t.enqueueMouseButton(2, true, hardwareID)
+	}
+	if mouse.UsButtonFlags&0x0008 != 0 {
+		t.enqueueMouseButton(2, false, hardwareID)
+	}
+	if mouse.UsButtonFlags&0x0010 != 0 {
+		t.enqueueMouseButton(3, true, hardwareID)
+	}
+	if mouse.UsButtonFlags&0x0020 != 0 {
+		t.enqueueMouseButton(3, false, hardwareID)
+	}
+	if mouse.UsButtonFlags&0x0040 != 0 {
+		t.enqueueMouseButton(4, true, hardwareID)
+	}
+	if mouse.UsButtonFlags&0x0080 != 0 {
+		t.enqueueMouseButton(4, false, hardwareID)
+	}
+	if mouse.UsButtonFlags&0x0100 != 0 {
+		t.enqueueMouseButton(5, true, hardwareID)
+	}
+	if mouse.UsButtonFlags&0x0200 != 0 {
+		t.enqueueMouseButton(5, false, hardwareID)
+	}
+
+	if mouse.UsButtonFlags&0x0400 != 0 {
+		t.enqueueEvent(InputEvent{Type: "mouse_wheel", WheelDelta: int(int16(mouse.UsButtonData)), Timestamp: time.Now().UnixMilli(), ClockNS: time.Now().UnixNano(), HardwareID: hardwareID}, true)
+	}
+	if mouse.UsButtonFlags&0x0800 != 0 {
+		t.enqueueEvent(InputEvent{Type: "mouse_wheel_h", WheelDelta: int(int16(mouse.UsButtonData)), Timestamp: time.Now().UnixMilli(), ClockNS: time.Now().UnixNano(), HardwareID: hardwareID}, true)
+	}
+}
+
+func (t *Trap) enqueueMouseButton(button int, pressed bool, hardwareID string) {
+	t.enqueueEvent(InputEvent{Type: "mouse_btn", Button: button, Pressed: pressed, Timestamp: time.Now().UnixMilli(), ClockNS: time.Now().UnixNano(), HardwareID: hardwareID}, true)
+}
+
+func (t *Trap) enqueueEvent(event InputEvent, critical bool) {
+	t.mu.Lock()
+	buffer := t.eventBuffer
+	t.mu.Unlock()
+	if buffer == nil || !buffer.Push(event, critical) {
+		if critical {
+			log.Printf("Input trap: critical event buffer closed")
 		}
 	}
 }
 
 // handleKeyboardInput processes keyboard input events
-func (t *Trap) handleKeyboardInput(keyboard *RAWKEYBOARD) {
+func (t *Trap) handleKeyboardInput(keyboard *RAWKEYBOARD, hardwareID string) {
 	event := InputEvent{
-		Type:      "key",
-		KeyCode:   uint16(keyboard.VKey),
-		Timestamp: time.Now().UnixMilli(),
+		Type:       "key",
+		KeyCode:    uint16(keyboard.VKey),
+		Timestamp:  time.Now().UnixMilli(),
+		ClockNS:    time.Now().UnixNano(),
+		ScanCode:   keyboard.MakeCode,
+		Extended:   keyboard.Flags&0x02 != 0,
+		E1:         keyboard.Flags&0x04 != 0,
+		HardwareID: hardwareID,
 	}
 
 	// Check if key is pressed or released
 	if keyboard.Flags&0x01 != 0 { // RI_KEY_BREAK
 		event.Pressed = false
+		delete(t.pressedScans, keyboard.MakeCode)
 	} else {
 		event.Pressed = true
+		if _, exists := t.pressedScans[keyboard.MakeCode]; exists {
+			event.Repeat = true
+		}
+		t.pressedScans[keyboard.MakeCode] = struct{}{}
 	}
-
-	select {
-	case t.events <- event:
-	default:
+	if getKeyState(VK_LSHIFT) < 0 || getKeyState(VK_RSHIFT) < 0 {
+		event.Modifiers |= 0x0001
 	}
+	if getKeyState(VK_LCONTROL) < 0 || getKeyState(VK_RCONTROL) < 0 {
+		event.Modifiers |= 0x0002
+	}
+	if getKeyState(VK_LMENU) < 0 || getKeyState(VK_RMENU) < 0 {
+		event.Modifiers |= 0x0004
+	}
+	if getKeyState(VK_LWIN) < 0 || getKeyState(VK_RWIN) < 0 {
+		event.Modifiers |= 0x0008
+	}
+	t.enqueueEvent(event, true)
 }
 
 // setupHooks sets up low-level mouse and keyboard hooks
@@ -746,184 +819,23 @@ func (t *Trap) hookThread() {
 
 // mouseHookProc handles mouse hook events
 func (t *Trap) mouseHookProc(nCode int32, wParam uintptr, lParam uintptr) uintptr {
-	if nCode >= 0 {
-		hookStruct := (*MSLLHOOKSTRUCT)(unsafe.Pointer(lParam))
-		msg := uint32(wParam)
-
-		event := InputEvent{
-			Type:      "mouse_move",
-			DeltaX:    0,
-			DeltaY:    0,
-			Timestamp: time.Now().UnixMilli(),
-		}
-
-		// Check if we're in capture mode (atomic for low overhead in hook)
-		captureEnabled := atomic.LoadInt32(&t.captureEnabled) == 1
-
-		switch msg {
-		case WM_MOUSEMOVE:
-			event.Type = "mouse_move"
-
-			if captureEnabled {
-				// In capture mode, calculate delta from center of screen
-				// and reset cursor to center to allow unlimited movement
-				screenWidth, _, _ := GetSystemMetrics.Call(0)  // SM_CXSCREEN
-				screenHeight, _, _ := GetSystemMetrics.Call(1) // SM_CYSCREEN
-				centerX := int32(screenWidth / 2)
-				centerY := int32(screenHeight / 2)
-
-				// Calculate delta from center
-				event.DeltaX = int(hookStruct.Pt.X - centerX)
-				event.DeltaY = int(hookStruct.Pt.Y - centerY)
-
-				// Reset cursor to center (will be blocked by returning 1)
-				if event.DeltaX != 0 || event.DeltaY != 0 {
-					SetCursorPos.Call(uintptr(centerX), uintptr(centerY))
-				}
-			} else {
-				// Normal mode: calculate relative movement from last position
-				if t.lastMouseX != -1 && t.lastMouseY != -1 {
-					event.DeltaX = int(hookStruct.Pt.X - t.lastMouseX)
-					event.DeltaY = int(hookStruct.Pt.Y - t.lastMouseY)
-				} else {
-					event.DeltaX = 0
-					event.DeltaY = 0
-				}
-				t.lastMouseX = hookStruct.Pt.X
-				t.lastMouseY = hookStruct.Pt.Y
-			}
-		case WM_LBUTTONDOWN:
-			event.Type = "mouse_btn"
-			event.Button = 1
-			event.Pressed = true
-		case WM_LBUTTONUP:
-			event.Type = "mouse_btn"
-			event.Button = 1
-			event.Pressed = false
-		case WM_RBUTTONDOWN:
-			event.Type = "mouse_btn"
-			event.Button = 2
-			event.Pressed = true
-		case WM_RBUTTONUP:
-			event.Type = "mouse_btn"
-			event.Button = 2
-			event.Pressed = false
-		case WM_MBUTTONDOWN:
-			event.Type = "mouse_btn"
-			event.Button = 3
-			event.Pressed = true
-		case WM_MBUTTONUP:
-			event.Type = "mouse_btn"
-			event.Button = 3
-			event.Pressed = false
-		case WM_MOUSEWHEEL:
-			event.Type = "mouse_wheel"
-			// WheelDelta is in the high-order word of MouseData (HIWORD)
-			wheelDelta := int16(hookStruct.MouseData >> 16)
-			event.WheelDelta = int(wheelDelta)
-		case WM_MOUSEHWHEEL:
-			event.Type = "mouse_wheel_h"
-			// Horizontal wheel delta
-			wheelDelta := int16(hookStruct.MouseData >> 16)
-			event.WheelDelta = int(wheelDelta)
-		case WM_XBUTTONDOWN:
-			event.Type = "mouse_btn"
-			// XButton is in the high-order word of MouseData
-			xButton := (hookStruct.MouseData >> 16) & 0xFFFF
-			if xButton == XBUTTON1 {
-				event.Button = 4
-			} else if xButton == XBUTTON2 {
-				event.Button = 5
-			}
-			event.Pressed = true
-		case WM_XBUTTONUP:
-			event.Type = "mouse_btn"
-			xButton := (hookStruct.MouseData >> 16) & 0xFFFF
-			if xButton == XBUTTON1 {
-				event.Button = 4
-			} else if xButton == XBUTTON2 {
-				event.Button = 5
-			}
-			event.Pressed = false
-		}
-
-		select {
-		case t.events <- event:
-		default:
-			// Channel full, drop event
-		}
-
-		// If capture mode is enabled, block input from reaching system
-		if captureEnabled {
-			// Return 1 to block input
-			return 1
-		}
+	if nCode >= 0 && atomic.LoadInt32(&t.captureEnabled) == 1 {
+		// Raw Input supplies the event payload. The low-level hook is solely a
+		// fail-safe blocker so Windows acceleration and cursor recentering do not
+		// alter the forwarded relative movement.
+		return 1
 	}
-
 	ret, _, _ := CallNextHookEx.Call(0, uintptr(nCode), wParam, lParam)
 	return ret
 }
 
 // keyboardHookProc handles keyboard hook events
 func (t *Trap) keyboardHookProc(nCode int32, wParam uintptr, lParam uintptr) uintptr {
-	if nCode >= 0 {
-		hookStruct := (*KBDLLHOOKSTRUCT)(unsafe.Pointer(lParam))
-		msg := uint32(wParam)
-		vk := uint32(hookStruct.VkCode)
-
-		// Determine pressed state first
-		var pressed bool
-		// WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101
-		// WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105
-		if msg == 0x0100 || msg == 0x0104 {
-			pressed = true
-		} else if msg == 0x0101 || msg == 0x0105 {
-			pressed = false
-		}
-
-		// Get current modifier states, but exclude the key being pressed/released
-		// to avoid self-referencing modifiers (critical for IME Shift toggle)
-		var modifiers uint16
-		isShiftKey := (vk == VK_LSHIFT || vk == VK_RSHIFT || vk == 0x10)
-		isCtrlKey := (vk == VK_LCONTROL || vk == VK_RCONTROL || vk == 0x11)
-		isAltKey := (vk == VK_LMENU || vk == VK_RMENU || vk == 0x12)
-		isWinKey := (vk == VK_LWIN || vk == VK_RWIN)
-
-		if !isShiftKey && (getKeyState(VK_LSHIFT) < 0 || getKeyState(VK_RSHIFT) < 0) {
-			modifiers |= 0x0001 // Shift
-		}
-		if !isCtrlKey && (getKeyState(VK_LCONTROL) < 0 || getKeyState(VK_RCONTROL) < 0) {
-			modifiers |= 0x0002 // Ctrl
-		}
-		if !isAltKey && (getKeyState(VK_LMENU) < 0 || getKeyState(VK_RMENU) < 0) {
-			modifiers |= 0x0004 // Alt
-		}
-		if !isWinKey && (getKeyState(VK_LWIN) < 0 || getKeyState(VK_RWIN) < 0) {
-			modifiers |= 0x0008 // Meta/Cmd
-		}
-
-		event := InputEvent{
-			Type:      "key",
-			KeyCode:   uint16(vk),
-			Modifiers: modifiers,
-			Pressed:   pressed,
-			Timestamp: time.Now().UnixMilli(),
-		}
-
-		select {
-		case t.events <- event:
-		default:
-			// Channel full, drop event
-		}
-
-		// If capture mode is enabled, block input from reaching system
-		// Exception: Let hotkeys registered with RegisterHotKey still work
-		if atomic.LoadInt32(&t.captureEnabled) == 1 {
-			// Return 1 to block input
-			return 1
-		}
+	if nCode >= 0 && atomic.LoadInt32(&t.captureEnabled) == 1 {
+		// Raw Input supplies VKey/scan code and key-up state; the hook only
+		// blocks the event while capture is active.
+		return 1
 	}
-
 	ret, _, _ := CallNextHookEx.Call(0, uintptr(nCode), wParam, lParam)
 	return ret
 }

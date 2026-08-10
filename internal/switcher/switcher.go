@@ -2,6 +2,7 @@
 package switcher
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sync"
@@ -10,19 +11,23 @@ import (
 	"vkvm/internal/config"
 	"vkvm/internal/ddc"
 	"vkvm/internal/network"
+	"vkvm/internal/notify"
 	"vkvm/internal/osutils"
+	"vkvm/internal/protocol"
 )
 
 // Switcher coordinates monitor input switching
 type Switcher struct {
-	mu         sync.Mutex
+	mu         sync.Mutex // callbacks and agent transport
+	switchMu   sync.Mutex // serializes DDC/profile transactions
 	controller ddc.Controller
 	configMgr  *config.Manager
 	wsClient   *network.WSClient
 
 	// Callbacks for UI notifications
-	onSwitch func(profileName string)
-	onError  func(error)
+	onSwitch      func(profileName string)
+	onError       func(error)
+	onAgentSwitch func(profileName string)
 }
 
 // New creates a new Switcher instance
@@ -39,15 +44,38 @@ func New(configMgr *config.Manager) (*Switcher, error) {
 
 	// Initialize WebSocket client if Agent
 	cfg := configMgr.Get()
-	if cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" {
-		log.Printf("Switcher: Initializing WebSocket client to Host %s", cfg.General.CoordinatorAddr)
-		s.wsClient = network.NewWSClient(cfg.General.CoordinatorAddr, cfg.General.APIToken)
+	if cfg.General.Role == "agent" {
+		coordinatorAddr := cfg.General.CoordinatorAddr
+		if coordinatorAddr == "" {
+			for _, peer := range cfg.General.PairedDevices {
+				if peer.Enabled && peer.Role == "host" && peer.LastKnownEndpoint != "" {
+					coordinatorAddr = peer.LastKnownEndpoint
+					break
+				}
+			}
+		}
+		log.Printf("Switcher: Initializing WebSocket client to Host %s", coordinatorAddr)
+		s.wsClient = network.NewWSClient(coordinatorAddr, cfg.General.APIToken, cfg.General.DeviceID)
+		s.wsClient.SetPublicKey(cfg.General.IdentityPublicKey)
+		s.wsClient.SetRole(cfg.General.Role)
+		for _, peer := range cfg.General.PairedDevices {
+			if peer.Enabled && peer.Role == "host" {
+				s.wsClient.SetExpectedPeerDeviceID(peer.DeviceID)
+				break
+			}
+		}
 
 		// Wire up callbacks
 		s.wsClient.OnSwitch = func(profile string) {
 			log.Printf("Switcher: Received remote switch command for '%s'", profile)
 			if err := s.SwitchLocalOnly(profile); err != nil {
 				log.Printf("Switcher: Remote switch execution failed: %v", err)
+			}
+			s.mu.Lock()
+			onAgentSwitch := s.onAgentSwitch
+			s.mu.Unlock()
+			if onAgentSwitch != nil {
+				onAgentSwitch(profile)
 			}
 		}
 
@@ -88,9 +116,151 @@ func (s *Switcher) SetOnError(callback func(error)) {
 	s.onError = callback
 }
 
-func (s *Switcher) SwitchToProfile(profileName string) error {
+// SetAgentInputHandler installs the input callback on the single agent
+// WebSocket session owned by Switcher. This prevents runService from opening
+// a second connection to the same coordinator.
+func (s *Switcher) SetAgentInputHandler(callback func(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.wsClient != nil {
+		s.wsClient.SetInputHandler(callback)
+	}
+}
+
+// SetAgentInputEventHandler installs a metadata-preserving callback on the
+// single authenticated agent session.
+func (s *Switcher) SetAgentInputEventHandler(callback func(protocol.InputPayload)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wsClient != nil {
+		s.wsClient.SetInputEventHandler(callback)
+	}
+}
+
+func (s *Switcher) SetAgentInputStateHandler(callback func(protocol.InputStatePayload)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wsClient != nil {
+		s.wsClient.SetInputStateHandler(callback)
+	}
+}
+
+// SetAgentSwitchHandler registers a callback for remote switch events after
+// the local DDC switch has been applied.
+func (s *Switcher) SetAgentSwitchHandler(callback func(profileName string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onAgentSwitch = callback
+}
+
+// SetAgentReleaseHandler registers the callback used to clear remote input
+// state after transport loss or an explicit release-all command.
+func (s *Switcher) SetAgentReleaseHandler(callback func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wsClient != nil {
+		s.wsClient.SetReleaseHandler(callback)
+	}
+}
+
+// SetAgentToken rotates the credential used by the authenticated coordinator
+// session on its next reconnect.
+func (s *Switcher) SetAgentToken(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wsClient != nil {
+		s.wsClient.SetToken(token)
+	}
+}
+
+// SetAgentCoordinatorEndpoint changes the endpoint used by the authenticated
+// agent session after network discovery. It does not tear down a healthy
+// connection; a caller may follow it with NotifyAgentNetworkChange.
+func (s *Switcher) SetAgentCoordinatorEndpoint(endpoint string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wsClient != nil && endpoint != "" {
+		s.wsClient.SetHostAddr(endpoint)
+	}
+}
+
+func (s *Switcher) SetAgentExpectedPeerDeviceID(deviceID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wsClient != nil {
+		s.wsClient.SetExpectedPeerDeviceID(deviceID)
+	}
+}
+
+func (s *Switcher) SetAgentTransportCapabilities(capabilities uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wsClient != nil {
+		s.wsClient.SetCapabilities(capabilities)
+	}
+}
+
+// EnableAgentNetworkAwareReconnect makes the agent wait for an explicit
+// network fingerprint change after a failed coordinator connection.
+func (s *Switcher) EnableAgentNetworkAwareReconnect(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wsClient != nil {
+		s.wsClient.EnableNetworkAwareReconnect(enabled)
+	}
+}
+
+// NotifyAgentNetworkChange wakes a dormant agent connection attempt.
+func (s *Switcher) NotifyAgentNetworkChange() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wsClient != nil {
+		s.wsClient.NotifyNetworkChange()
+	}
+}
+
+// AgentSessionID exposes the authenticated WS session for transport handover
+// fencing. It returns an empty string before the first handshake.
+func (s *Switcher) AgentSessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wsClient == nil {
+		return ""
+	}
+	return s.wsClient.SessionID()
+}
+
+// WaitForAgentConnection waits until the single authenticated agent session
+// has completed its handshake. Discovery must not report Active merely because
+// a TCP port accepted a connection; this closes the gap between endpoint
+// probing and an actually usable control transport.
+func (s *Switcher) WaitForAgentConnection(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	client := s.wsClient
+	s.mu.Unlock()
+	if client == nil {
+		return fmt.Errorf("agent WebSocket client is not configured")
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if client.IsConnected() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Switcher) SwitchToProfile(profileName string) error {
+	s.switchMu.Lock()
+	defer s.switchMu.Unlock()
 
 	profile := s.configMgr.GetProfile(profileName)
 	if profile == nil {
@@ -102,8 +272,8 @@ func (s *Switcher) SwitchToProfile(profileName string) error {
 
 // SwitchLocalOnly switches local monitors only, bypassing agent forwarding or host propagation
 func (s *Switcher) SwitchLocalOnly(profileName string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.switchMu.Lock()
+	defer s.switchMu.Unlock()
 
 	profile := s.configMgr.GetProfile(profileName)
 	if profile == nil {
@@ -118,9 +288,12 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 
 	// Handle Agent Role: Forward to Host instead of local execution
 	if allowForward && cfg.General.Role == "agent" && cfg.General.CoordinatorAddr != "" {
-		if s.wsClient != nil {
+		s.mu.Lock()
+		client := s.wsClient
+		s.mu.Unlock()
+		if client != nil {
 			log.Printf("Switcher: Operating as Agent, forwarding switch request '%s' to Host via WebSocket", profileName)
-			s.wsClient.SendSwitch(profileName)
+			client.SendSwitch(profileName)
 		} else {
 			log.Printf("Switcher: Error: Agent role but no WebSocket client available")
 		}
@@ -144,7 +317,10 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 	// Execute local DDC switch if mode allows
 	if switchMode == "local" || switchMode == "both" {
 		// Get currently detected monitors for this machine to filter inputs
-		activeMonitors, _ := s.controller.ListMonitors()
+		activeMonitors, err := s.controller.ListMonitors()
+		if err != nil {
+			return fmt.Errorf("failed to detect monitors before switching: %w", err)
+		}
 		activeIDs := make(map[string]bool)
 		for _, m := range activeMonitors {
 			activeIDs[m.ID] = true
@@ -153,12 +329,20 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 		var wg sync.WaitGroup
 		var errMu sync.Mutex
 
-		for monitorID, inputSource := range profile.MonitorInputs {
-			// Skip monitors not found on this machine (avoids errors from synced foreign configs)
+		missing := 0
+		for monitorID := range profile.MonitorInputs {
 			if !activeIDs[monitorID] {
-				log.Printf("Switcher: Skipping monitor %s (not detected on this computer)", monitorID)
-				continue
+				missing++
 			}
+		}
+		if len(profile.MonitorInputs) > 0 && missing == len(profile.MonitorInputs) {
+			return fmt.Errorf("no configured monitors for profile %q are currently detected", profileName)
+		}
+		if missing > 0 {
+			return fmt.Errorf("profile %q is missing %d configured monitor(s)", profileName, missing)
+		}
+
+		for monitorID, inputSource := range profile.MonitorInputs {
 
 			wg.Add(1)
 			go func(mid string, src int) {
@@ -172,12 +356,20 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 			}(monitorID, inputSource)
 		}
 		wg.Wait()
+		if lastErr != nil {
+			return fmt.Errorf("profile %q switch failed: %w", profileName, lastErr)
+		}
 	}
 
-	// Save config
-	cfg.General.CurrentProfile = profileName
+	// Commit the active profile only after all monitor writes have succeeded.
+	// Keep the previous value so a persistence failure can roll back the
+	// in-memory transaction as well.
+	previousProfile := cfg.General.CurrentProfile
+	s.configMgr.SetCurrentProfile(profileName)
 	if err := s.configMgr.Save(); err != nil {
 		log.Printf("Failed to save config: %v", err)
+		s.configMgr.SetCurrentProfile(previousProfile)
+		return fmt.Errorf("failed to persist active profile: %w", err)
 	}
 
 	// Legacy RemoteHosts support is deprecated in favor of WebSocket broadcast
@@ -186,18 +378,29 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 		log.Printf("Switcher: Note: 'remote_hosts' in config is ignored in WebSocket mode. Ensure agents are connected to Host.")
 	}
 
-	if s.onSwitch != nil {
-		s.onSwitch(profileName)
+	// Send system notification only when explicitly enabled.
+	if cfg.General.ShowNotifications {
+		notify.SwitchNotify(profileName)
 	}
 
-	return lastErr
+	s.mu.Lock()
+	onSwitch := s.onSwitch
+	s.mu.Unlock()
+	if onSwitch != nil {
+		onSwitch(profileName)
+	}
+
+	return nil
 }
 
 // SyncProfiles triggers a sync request via WebSocket if connected
 func (s *Switcher) SyncProfiles() error {
 	// With WebSocket, sync is automatic/pushed, but we can manually request it
-	if s.wsClient != nil {
-		s.wsClient.SendSyncRequest()
+	s.mu.Lock()
+	client := s.wsClient
+	s.mu.Unlock()
+	if client != nil {
+		client.SendSyncRequest()
 		return nil
 	}
 	return nil
@@ -220,10 +423,37 @@ func (s *Switcher) TestMonitor(monitorID string, input ddc.InputSource) error {
 
 // IsConnectedToCheck returns true if the agent is connected to the host
 func (s *Switcher) IsConnectedToCheck() bool {
-	if s.wsClient == nil {
+	s.mu.Lock()
+	client := s.wsClient
+	s.mu.Unlock()
+	if client == nil {
 		return false
 	}
-	return s.wsClient.IsConnected()
+	return client.IsConnected()
+}
+
+// AgentTransportState returns the authenticated coordinator transport state.
+// Hosts report disconnected because they do not own an agent transport.
+func (s *Switcher) AgentTransportState() network.ConnectionState {
+	s.mu.Lock()
+	client := s.wsClient
+	s.mu.Unlock()
+	if client == nil {
+		return network.ConnectionDisconnected
+	}
+	return client.State()
+}
+
+// Close stops the agent transport, if one is running. Host instances have no
+// transport and Close is a no-op.
+func (s *Switcher) Close() {
+	s.mu.Lock()
+	client := s.wsClient
+	s.wsClient = nil
+	s.mu.Unlock()
+	if client != nil {
+		client.Close()
+	}
 }
 
 // GetCurrentInputs returns the current input source for all detected monitors
@@ -262,10 +492,12 @@ func (s *Switcher) DetectActiveProfile() (string, error) {
 
 		// Check if all profile's monitor inputs match current state
 		for monitorID, expectedInput := range profile.MonitorInputs {
-			// Skip monitors not currently detected
 			currentInput, exists := currentInputs[monitorID]
 			if !exists {
-				continue
+				// A missing configured monitor is uncertainty, not a match. This
+				// keeps profile-based input injection fail-closed during disconnects.
+				matches = false
+				break
 			}
 
 			if int(currentInput) != expectedInput {

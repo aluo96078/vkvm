@@ -12,6 +12,17 @@ type InputEvent struct {
 	Modifiers  uint16 `json:"modifiers,omitempty"`
 	WheelDelta int    `json:"wheel_delta,omitempty"` // Positive=up/right, Negative=down/left
 	Timestamp  int64  `json:"ts"`                    // Unix ms timestamp
+	DeviceID   string `json:"device_id,omitempty"`
+	// HardwareID identifies the physical source device within the capture
+	// session. It is distinct from DeviceID, which identifies the VKVM peer.
+	HardwareID string `json:"hardware_id,omitempty"`
+	ScanCode   uint16 `json:"scan_code,omitempty"`
+	Extended   bool   `json:"extended,omitempty"`
+	E1         bool   `json:"e1,omitempty"`
+	Repeat     bool   `json:"repeat,omitempty"`
+	Sequence   uint32 `json:"sequence,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	ClockNS    int64  `json:"clock_ns,omitempty"`
 }
 
 // InputCapture defines the interface for capturing input events
@@ -27,4 +38,9 @@ type InputInjector interface {
 	InjectMouseButton(button int, pressed bool) error
 	InjectMouseWheel(deltaY, deltaX int) error
 	InjectKey(keyCode uint16, pressed bool, modifiers uint16) error
+	// InjectKeyEvent preserves the physical Windows keyboard identity. The
+	// legacy InjectKey method remains available for callers that only have a
+	// virtual-key code.
+	InjectKeyEvent(keyCode, scanCode uint16, extended, e1, pressed bool, modifiers uint16) error
+	ReleaseAll() error
 }

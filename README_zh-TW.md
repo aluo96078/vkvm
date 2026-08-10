@@ -101,13 +101,41 @@ VKVM 會在系統托盤運行（macOS 為選單列，Windows 為工作列通知�
 
 1. **Host 主機**（主控端）：
    - 設定角色：`Host`
-   - 啟用 API 伺服器
+   - 明確啟用 API 伺服器
+   - 設定高熵 `API Token`；未設定 token 時 API 不會啟動
 
 2. **Agent 機器**（被控端）：
    - 設定角色：`Agent`
    - 在「Coordinator Address」輸入 Host 的 IP:Port
+   - 使用與 Host 相同的 API Token
    
 Agent 會自動從 Host 同步所有 Profile 設定。
+
+> ⚠️ API 與鍵鼠轉發預設關閉。請只在可信網路、完成配對與 token 設定後啟用；HTTP、WebSocket 與 UDP 控制面都需要驗證。
+
+「開機自動啟動」會安裝登入使用者工作階段的啟動項目（macOS
+LaunchAgent 或 Windows 使用者 Run）。Agent 找不到 Coordinator 時會停止週期重試，
+等網路指紋改變再喚醒；UDP heartbeat 失效會自動降級到 WebSocket。現行轉發是軟體
+輸入擷取／注入，不是 USB/IP 真實 HID 裝置，無法宣稱支援 Secure Input 或登入畫面。
+
+Windows 安裝器另提供非互動式 `VKVMCore` SCM 服務（`vkvm.exe --service`）負責
+網路核心與監督；登入使用者以 `vkvm.exe --companion` 執行 companion，負責托盤、
+全局 hook 與互動式權限，且不會再綁定第二個 API/UDP listener。
+
+Agent 會先嘗試已配對裝置的最後端點，再於開機或網路指紋變更後進行一次有界
+`_vkvm._tcp` mDNS 探索；若找不到唯一的 UUID／公鑰匹配，會進入
+`WaitingForNetworkChange`，不會持續掃描 LAN。
+
+USB/BLE 可行性與需要硬體驗證的後續路線記錄於
+[`docs/USB_HID_BLE_FEASIBILITY.md`](docs/USB_HID_BLE_FEASIBILITY.md)。
+安裝／設定請參考 [`docs/INSTALL.md`](docs/INSTALL.md)，API 請參考
+[`docs/API.md`](docs/API.md)。
+
+API port、角色、Coordinator 位址或 API token 的變更會在下次服務重啟時套用；UI 儲存
+隱藏 token 的設定快照時會保留原 token。
+
+通過驗證的 `GET /api/metrics` 會回傳接收／注入計數、佇列深度、p50/p95/p99、
+時鐘／路徑偏移、jitter 與 sequence gap；驗收門檻仍須以真實硬體／網路基準由操作者設定。
 
 ## 熱鍵範例
 

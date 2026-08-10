@@ -79,7 +79,7 @@ func newWindowsController() (*windowsController, error) {
 	// Try project tools directory first (user may have updated version here)
 	paths := []string{
 		`D:\vkvm\tools\ControlMyMonitor.exe`, // Project tools directory (priority)
-		"ControlMyMonitor.exe",                // In PATH
+		"ControlMyMonitor.exe",               // In PATH
 		`C:\Program Files\ControlMyMonitor\ControlMyMonitor.exe`,
 		`C:\Program Files (x86)\ControlMyMonitor\ControlMyMonitor.exe`,
 	}
@@ -109,7 +109,7 @@ func (c *windowsController) runWithTempFile(outputSwitch string, preArgs ...stri
 	// But os.TempDir() is usually writable.
 	// Use nanosecond timestamp to avoid collision
 	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("vkvm_ddc_%d.txt", time.Now().UnixNano()))
-	
+
 	// Ensure cleanup
 	defer func() {
 		// Try to remove, but don't fail if it doesn't exist (e.g. tool failed to create it)
@@ -118,7 +118,7 @@ func (c *windowsController) runWithTempFile(outputSwitch string, preArgs ...stri
 
 	args := append(preArgs, outputSwitch, tmpFile)
 	cmd := exec.Command(c.toolPath, args...)
-	
+
 	// Capture stderr in case of tool error
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -138,7 +138,7 @@ func (c *windowsController) runWithTempFile(outputSwitch string, preArgs ...stri
 		}
 		return nil, fmt.Errorf("failed to read output file: %w", err)
 	}
-	
+
 	return data, nil
 }
 
@@ -160,11 +160,11 @@ func (c *windowsController) ListMonitors() ([]Monitor, error) {
 
 	// Optimize: Fetch details for all monitors in parallel
 	var wg sync.WaitGroup
-	monitorsMutex := &sync.Mutex{} // Protects concurrent writes to monitors slice if needed? 
-	// Actually writing to distinct indices monitors[i] is safe in Go, 
+	monitorsMutex := &sync.Mutex{} // Protects concurrent writes to monitors slice if needed?
+	// Actually writing to distinct indices monitors[i] is safe in Go,
 	// but let's be safe against race detector if any slices inside struct are modified.
 	// However, we are modifying fields of struct, which is safe.
-	
+
 	for i := range monitors {
 		wg.Add(1)
 		go func(idx int) {
@@ -176,18 +176,18 @@ func (c *windowsController) ListMonitors() ([]Monitor, error) {
 			}
 
 			supported, input, err := c.fetchMonitorDetails(monitors[idx].ID)
-			
+
 			monitorsMutex.Lock()
 			monitors[idx].DDCSupported = supported
 			if err == nil {
 				monitors[idx].InputSource = input
-				
+
 				// Heuristic logic for the DP monitor showing as HDMI1
 				if monitors[idx].Name == "" && monitors[idx].Serial == "" && monitors[idx].InputSource == InputSourceHDMI1 {
 					log.Printf("DDC: Monitor %s has missing metadata and reports HDMI1. Applying heuristic -> DP1", monitors[idx].ID)
 					monitors[idx].InputSource = InputSourceDP1
 				}
-				
+
 				if !monitors[idx].DDCSupported {
 					monitors[idx].DDCSupported = true
 				}
@@ -268,7 +268,7 @@ func (c *windowsController) fetchMonitorDetails(id string) (bool, InputSource, e
 		if record[0] == "60" || record[0] == "10" {
 			supported = true
 		}
-		
+
 		if record[0] == "60" && len(record) >= 4 {
 			currentValStr := strings.TrimSpace(record[3])
 			val, err := strconv.ParseInt(currentValStr, 10, 32)
@@ -390,12 +390,12 @@ func (c *windowsController) GetCurrentInput(monitorID string) (InputSource, erro
 	}
 
 	s := decodeUTF16(outputBytes)
-	
+
 	// Parse CSV
 	reader := csv.NewReader(strings.NewReader(s))
 	// Allow for variable number of fields if the tool behavior changes
-	reader.FieldsPerRecord = -1 
-	
+	reader.FieldsPerRecord = -1
+
 	records, err := reader.ReadAll()
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse CSV output: %w", err)
@@ -404,7 +404,7 @@ func (c *windowsController) GetCurrentInput(monitorID string) (InputSource, erro
 	// Look for VCP code 60 (Input Select)
 	// Default CSV format: VCP Code, VCP Code Name, Read-Write, Current Value, ...
 	// records[0] is header usually
-	
+
 	for _, record := range records {
 		if len(record) < 4 {
 			continue
@@ -475,12 +475,12 @@ func (c *windowsController) TestDDCSupport(monitorID string) bool {
 		log.Printf("DDC: TestDDCSupport failed to run tool: %v", err)
 		return false
 	}
-	
+
 	s := decodeUTF16(outputBytes)
 	if len(s) < 10 { // Too short to be valid
 		return false
 	}
-	
+
 	// Check if we have VCP 60 or 10 in the CSV
 	reader := csv.NewReader(strings.NewReader(s))
 	reader.FieldsPerRecord = -1
@@ -488,7 +488,7 @@ func (c *windowsController) TestDDCSupport(monitorID string) bool {
 	if err != nil {
 		return false
 	}
-	
+
 	for _, record := range records {
 		if len(record) > 0 {
 			if record[0] == "60" || record[0] == "10" {
@@ -496,7 +496,6 @@ func (c *windowsController) TestDDCSupport(monitorID string) bool {
 			}
 		}
 	}
-	
+
 	return false
 }
-

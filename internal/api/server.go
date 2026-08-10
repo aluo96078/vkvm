@@ -2,14 +2,24 @@
 package api
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"sync"
+	"time"
 
+	"vkvm/internal/autostart"
 	"vkvm/internal/config"
+	"vkvm/internal/input"
 	"vkvm/internal/network"
+	"vkvm/internal/protocol"
+	"vkvm/internal/security"
+	"vkvm/internal/service"
 	"vkvm/internal/switcher"
 )
 
@@ -18,8 +28,19 @@ type Server struct {
 	configMgr              *config.Manager
 	switcher               *switcher.Switcher
 	token                  string
+	tokens                 *security.KeyRing
 	wsMgr                  *WSManager
 	lastUSBForwardingState bool // Track last USB forwarding state for change detection
+	mu                     sync.Mutex
+	wsMu                   sync.RWMutex
+	httpServer             *http.Server
+	listener               net.Listener
+	metrics                *input.Metrics
+	mdnsAdvertiser         *network.MDNSAdvertiser
+	permissionProvider     func() input.PermissionStatus
+	serviceStatusProvider  func() service.DiagnosticStatus
+	inputStateProvider     func() input.StateSnapshot
+	udpTransportSelector   func(deviceID string) bool
 }
 
 // NewServer creates a new API server
@@ -27,6 +48,7 @@ func NewServer(configMgr *config.Manager, sw *switcher.Switcher) *Server {
 	s := &Server{
 		configMgr: configMgr,
 		switcher:  sw,
+		tokens:    security.NewKeyRing(configMgr.Get().General.APIToken, 30*time.Second),
 	}
 	s.wsMgr = newWSManager(s)
 
@@ -37,10 +59,21 @@ func NewServer(configMgr *config.Manager, sw *switcher.Switcher) *Server {
 	// Register callback for USB forwarding changes
 	configMgr.RegisterChangeCallback(func() {
 		cfg := configMgr.Get()
-		if cfg.General.USBForwardingEnabled != s.lastUSBForwardingState {
-			log.Printf("API Server: USB forwarding setting changed from %v to %v, broadcasting to agents", s.lastUSBForwardingState, cfg.General.USBForwardingEnabled)
-			s.wsMgr.BroadcastUSBForwarding(cfg.General.USBForwardingEnabled)
+		s.mu.Lock()
+		changed := cfg.General.USBForwardingEnabled != s.lastUSBForwardingState
+		previous := s.lastUSBForwardingState
+		if changed {
 			s.lastUSBForwardingState = cfg.General.USBForwardingEnabled
+		}
+		s.mu.Unlock()
+		if s.tokens != nil {
+			s.tokens.Set(cfg.General.APIToken)
+		}
+		if changed {
+			log.Printf("API Server: USB forwarding setting changed from %v to %v, broadcasting to agents", previous, cfg.General.USBForwardingEnabled)
+			if manager := s.currentWSManager(); manager != nil {
+				manager.BroadcastUSBForwarding(cfg.General.USBForwardingEnabled)
+			}
 		}
 	})
 
@@ -49,28 +82,119 @@ func NewServer(configMgr *config.Manager, sw *switcher.Switcher) *Server {
 
 // BroadcastInput broadcasts input events to all connected agents
 func (s *Server) BroadcastInput(eventType string, deltaX, deltaY int, button int, pressed bool, keyCode uint16, modifiers uint16, wheelDelta int, timestamp int64) {
-	s.wsMgr.BroadcastInput(eventType, deltaX, deltaY, button, pressed, keyCode, modifiers, wheelDelta, timestamp)
+	if manager := s.currentWSManager(); manager != nil {
+		manager.BroadcastInput(eventType, deltaX, deltaY, button, pressed, keyCode, modifiers, wheelDelta, timestamp)
+	}
+}
+
+// BroadcastInputEvent broadcasts a metadata-rich input event.
+func (s *Server) BroadcastInputEvent(event input.InputEvent) {
+	if manager := s.currentWSManager(); manager != nil {
+		manager.BroadcastInputEvent(event)
+	}
+}
+
+// BroadcastReleaseAll releases remote input state on every connected Agent.
+func (s *Server) BroadcastReleaseAll() {
+	if manager := s.currentWSManager(); manager != nil {
+		manager.BroadcastReleaseAll()
+	}
+}
+
+// SetInputMetrics attaches optional input-path diagnostics to /api/metrics.
+func (s *Server) SetInputMetrics(metrics *input.Metrics) {
+	s.mu.Lock()
+	s.metrics = metrics
+	s.mu.Unlock()
+}
+
+func (s *Server) SetInputStateProvider(provider func() input.StateSnapshot) {
+	s.wsMu.Lock()
+	s.inputStateProvider = provider
+	manager := s.wsMgr
+	s.wsMu.Unlock()
+	if manager != nil {
+		manager.SetInputStateProvider(provider)
+	}
+}
+
+// SetPermissionProvider attaches platform TCC/permission diagnostics without
+// making the API server itself responsible for prompting or mutating consent.
+func (s *Server) SetPermissionProvider(provider func() input.PermissionStatus) {
+	s.mu.Lock()
+	s.permissionProvider = provider
+	s.mu.Unlock()
+}
+
+func (s *Server) SetServiceStatusProvider(provider func() service.DiagnosticStatus) {
+	s.mu.Lock()
+	s.serviceStatusProvider = provider
+	s.mu.Unlock()
+}
+
+func (s *Server) SetUDPTransportSelector(selector func(deviceID string) bool) {
+	s.wsMu.Lock()
+	s.udpTransportSelector = selector
+	manager := s.wsMgr
+	s.wsMu.Unlock()
+	if manager != nil {
+		manager.SetUDPTransportSelector(selector)
+	}
+}
+
+func (s *Server) currentWSManager() *WSManager {
+	s.wsMu.RLock()
+	defer s.wsMu.RUnlock()
+	return s.wsMgr
+}
+
+// prepareWSManager returns a stopped-or-new manager and starts its hub. The
+// API supervisor may restart a Server after a transient listener failure, so
+// the manager must not be permanently consumed by a sync.Once.
+func (s *Server) prepareWSManager() *WSManager {
+	s.wsMu.Lock()
+	manager := s.wsMgr
+	if manager == nil || manager.isStopped() {
+		manager = newWSManager(s)
+		manager.SetInputStateProvider(s.inputStateProvider)
+		manager.SetUDPTransportSelector(s.udpTransportSelector)
+		s.wsMgr = manager
+	}
+	s.wsMu.Unlock()
+	manager.startAsync()
+	return manager
 }
 
 // Start starts the API server on the specified port
 func (s *Server) Start(port int) error {
 	cfg := s.configMgr.Get()
 	s.token = cfg.General.APIToken
+	if cfg.General.APIToken == "" {
+		return fmt.Errorf("API requires a non-empty authentication token")
+	}
 
-	// Start WebSocket Manager
-	go s.wsMgr.start()
+	// Start WebSocket Manager. This is deliberately restartable because the
+	// service supervisor can recycle the HTTP listener after a transient error.
+	wsMgr := s.prepareWSManager()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/switch", s.handleSwitch)
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/metrics", s.handleMetrics)
+	mux.HandleFunc("/api/permissions", s.handlePermissions)
+	mux.HandleFunc("/api/service", s.handleServiceStatus)
 	mux.HandleFunc("/api/discover", s.handleDiscover)
 	mux.HandleFunc("/api/config", s.handleConfig)
+	mux.HandleFunc("/api/pairing", s.handlePairing)
 	mux.HandleFunc("/api/detect", s.handleDetect)
-	mux.HandleFunc("/ws", s.wsMgr.handleWebSocket)
+	mux.HandleFunc("/ws", wsMgr.handleWebSocket)
 	mux.HandleFunc("/health", s.handleHealth)
 
-	// Use "0.0.0.0:port" and explicitly use tcp4 to avoid IPv6-only binding issues on Windows
-	addr := fmt.Sprintf("0.0.0.0:%d", port)
+	// Bind the wildcard TCP listener so a dual-stack host can accept both A
+	// and AAAA mDNS endpoints. The OS may still select IPv4-only behaviour on
+	// a platform policy that disables v6; discovery keeps the IPv4 endpoint as
+	// a fallback in that case.
+	addr := fmt.Sprintf(":%d", port)
 
 	// Diagnostic: Print all local IPs to console to help user verify
 	log.Printf("--- Diagnostic: Network Interfaces ---")
@@ -81,19 +205,54 @@ func (s *Server) Start(port int) error {
 	}
 	log.Printf("--------------------------------------")
 
-	log.Printf("Starting API server on FORCED IPv4 %s", addr)
+	log.Printf("Starting API server on dual-stack wildcard %s", addr)
 
-	// Create a listener explicitly with tcp4
-	ln, err := net.Listen("tcp4", addr)
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
+		wsMgr.stop()
 		log.Printf("ERROR: API server failed to listen on %s: %v", addr, err)
 		log.Printf("Note: VKVM will continue running without remote switching support.")
 		return err
 	}
 
 	server := &http.Server{
-		Handler: s.authMiddleware(s.recoverMiddleware(mux)),
+		Handler:           s.authMiddleware(s.recoverMiddleware(mux)),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
+	s.mu.Lock()
+	s.httpServer = server
+	s.listener = ln
+	s.mu.Unlock()
+	localIP, _ := network.GetLocalIP()
+	localIPs, _ := network.GetLocalAddresses()
+	advertiser, mdnsErr := network.StartMDNSAdvertiser(context.Background(), network.MDNSServiceInfo{
+		DeviceID: cfg.General.DeviceID, Role: cfg.General.Role, Port: port,
+		IP: net.ParseIP(localIP), IPs: localIPs, ProtocolVersion: protocol.ProtocolVersion,
+		Capabilities: protocol.CapabilityInputMetadata | protocol.CapabilityReliableControl | protocol.CapabilityStateSnapshot | protocol.CapabilityWebSocket | protocol.CapabilityUDP,
+		PublicKey:    cfg.General.IdentityPublicKey,
+	})
+	if mdnsErr != nil {
+		log.Printf("mDNS advertiser unavailable: %v", mdnsErr)
+	} else {
+		s.mu.Lock()
+		s.mdnsAdvertiser = advertiser
+		s.mu.Unlock()
+	}
+	defer func() {
+		wsMgr.stop()
+		if mdnsErr == nil && advertiser != nil {
+			_ = advertiser.Close()
+		}
+		s.mu.Lock()
+		if s.httpServer == server {
+			s.httpServer = nil
+			s.listener = nil
+		}
+		s.mu.Unlock()
+	}()
 
 	// This is blocking
 	if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -101,6 +260,97 @@ func (s *Server) Start(port int) error {
 		return err
 	}
 	return nil
+}
+
+// Healthy reports whether the API listener is currently serving. It is used by
+// the core supervisor and intentionally does not perform a network self-call.
+func (s *Server) Healthy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.httpServer != nil && s.listener != nil
+}
+
+func (s *Server) isDevicePaired(deviceID string) bool {
+	return s.configMgr.IsPaired(deviceID)
+}
+
+// handlePairing manages the explicit peer allowlist. The endpoint is itself
+// protected by the API bearer token; it never accepts a blank or wildcard
+// device identity.
+func (s *Server) handlePairing(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cfg := s.configMgr.Get()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"required": cfg.General.PairingRequired,
+			"devices":  cfg.General.PairedDevices,
+		})
+	case http.MethodPost:
+		var peer config.PairedDevice
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+		if err := decoder.Decode(&peer); err != nil {
+			http.Error(w, "invalid pairing data", http.StatusBadRequest)
+			return
+		}
+		if err := s.configMgr.PairDevice(peer); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.configMgr.Save(); err != nil {
+			http.Error(w, "failed to save pairing", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "paired", "device_id": peer.DeviceID})
+	case http.MethodDelete:
+		deviceID := r.URL.Query().Get("device_id")
+		if deviceID == "" {
+			http.Error(w, "device_id is required", http.StatusBadRequest)
+			return
+		}
+		if !s.configMgr.UnpairDevice(deviceID) {
+			http.Error(w, "device not paired", http.StatusNotFound)
+			return
+		}
+		if err := s.configMgr.Save(); err != nil {
+			http.Error(w, "failed to save pairing", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unpaired", "device_id": deviceID})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// Stop gracefully shuts down HTTP, WebSocket and UDP-control listeners owned
+// by this server. It is safe to call when Start failed or more than once.
+func (s *Server) Stop() error {
+	// Best effort: tell connected agents to release before their sockets are
+	// closed. The caller may also send an explicit release-all first.
+	s.BroadcastReleaseAll()
+	s.mu.Lock()
+	server := s.httpServer
+	listener := s.listener
+	advertiser := s.mdnsAdvertiser
+	s.mdnsAdvertiser = nil
+	s.mu.Unlock()
+	var err error
+	if server != nil {
+		err = server.Close()
+	} else if listener != nil {
+		err = listener.Close()
+	}
+	if manager := s.currentWSManager(); manager != nil {
+		manager.stop()
+	}
+	if advertiser != nil {
+		if closeErr := advertiser.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }
 
 // recoverMiddleware prevents panics from crashing the whole server
@@ -128,15 +378,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// If token is configured, verify it
-		if s.token != "" {
-			authHeader := r.Header.Get("Authorization")
-			expectedAuth := "Bearer " + s.token
-
-			if authHeader != expectedAuth {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
+		authHeader := r.Header.Get("Authorization")
+		if s.tokens == nil || !s.tokens.MatchBearer(authHeader) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
 		}
 
 		next.ServeHTTP(w, r)
@@ -188,15 +433,40 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		cfg := s.configMgr.Get()
+		cfg.General.APIToken = ""
+		cfg.General.IdentityPrivateKey = ""
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(cfg)
 
 	case "POST":
 		var newCfg config.Config
-		if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err := decoder.Decode(&newCfg); err != nil {
 			http.Error(w, "Invalid configuration data", http.StatusBadRequest)
 			return
 		}
+		var extra interface{}
+		if err := decoder.Decode(&extra); err != io.EOF {
+			http.Error(w, "Invalid configuration data", http.StatusBadRequest)
+			return
+		}
+		currentCfg := s.configMgr.Get()
+		// The secret is never returned by GET. Preserve it on updates that
+		// originate from a redacted snapshot.
+		if newCfg.General.APIToken == "" {
+			newCfg.General.APIToken = currentCfg.General.APIToken
+		}
+		if newCfg.General.IdentityPublicKey == "" {
+			newCfg.General.IdentityPublicKey = currentCfg.General.IdentityPublicKey
+		}
+		if newCfg.General.IdentityPrivateKey == "" {
+			newCfg.General.IdentityPrivateKey = currentCfg.General.IdentityPrivateKey
+		}
+		if newCfg.General.APIEnabled && newCfg.General.APIToken == "" {
+			http.Error(w, "api_token is required when api_enabled is true", http.StatusBadRequest)
+			return
+		}
+		change := config.ClassifyChange(currentCfg, &newCfg)
 
 		log.Printf("API: Receiving configuration update from %s", r.RemoteAddr)
 
@@ -210,12 +480,17 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 		// Immediately broadcast USB forwarding change to connected agents
 		log.Printf("API: Config POST received, broadcasting USB forwarding=%v to agents", newCfg.General.USBForwardingEnabled)
-		if s.wsMgr != nil {
-			s.wsMgr.BroadcastUSBForwarding(newCfg.General.USBForwardingEnabled)
+		if manager := s.currentWSManager(); manager != nil {
+			manager.BroadcastUSBForwarding(newCfg.General.USBForwardingEnabled)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":              "ok",
+			"applied_immediately": change.Immediate,
+			"restart_required":    change.RestartRequired,
+		})
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -232,11 +507,73 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	currentProfile := s.switcher.GetCurrentProfile()
 	cfg := s.configMgr.Get()
 
+	status := map[string]interface{}{
+		"current_profile":   currentProfile,
+		"profiles":          getProfileNames(cfg.Profiles),
+		"role":              cfg.General.Role,
+		"api_enabled":       cfg.General.APIEnabled,
+		"usb_forwarding":    cfg.General.USBForwardingEnabled,
+		"start_on_boot":     cfg.General.StartOnBoot,
+		"autostart_enabled": autostart.IsEnabled(),
+	}
+	s.mu.Lock()
+	permissionProvider := s.permissionProvider
+	s.mu.Unlock()
+	if permissionProvider != nil {
+		status["permissions"] = permissionProvider()
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"current_profile": currentProfile,
-		"profiles":        getProfileNames(cfg.Profiles),
-	})
+	_ = json.NewEncoder(w).Encode(status)
+}
+
+func (s *Server) handlePermissions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	provider := s.permissionProvider
+	s.mu.Unlock()
+	status := input.PermissionStatus{}
+	if provider != nil {
+		status = provider()
+	} else {
+		status = input.CurrentPermissions()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(status)
+}
+
+func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	provider := s.serviceStatusProvider
+	s.mu.Unlock()
+	status := service.DiagnosticStatus{}
+	if provider != nil {
+		status = provider()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(status)
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	metrics := s.metrics
+	s.mu.Unlock()
+	if metrics == nil {
+		http.Error(w, "metrics unavailable", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(metrics.Snapshot())
 }
 
 // handleDetect handles GET /api/detect - detects current active profile by reading monitor inputs
@@ -298,9 +635,11 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := s.configMgr.Get()
-	log.Printf("API: Starting LAN scan on port %d", cfg.General.APIPort)
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	log.Printf("API: Starting bounded mDNS discovery (fallback port %d)", cfg.General.APIPort)
 
-	hosts, err := network.ScanLAN(cfg.General.APIPort)
+	hosts, err := network.DiscoverVKVM(ctx, cfg.General.APIPort)
 	if err != nil {
 		log.Printf("API: Scan error: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -322,9 +661,17 @@ func getProfileNames(profiles []config.Profile) []string {
 	return names
 }
 
+func validBearerToken(header, token string) bool {
+	if token == "" || len(header) != len("Bearer ")+len(token) {
+		return false
+	}
+	expected := "Bearer " + token
+	return subtle.ConstantTimeCompare([]byte(header), []byte(expected)) == 1
+}
+
 // BroadcastSwitch provides a public method to broadcast switch events
 func (s *Server) BroadcastSwitch(profile string, origin string) {
-	if s.wsMgr != nil {
-		s.wsMgr.BroadcastSwitch(profile, origin)
+	if manager := s.currentWSManager(); manager != nil {
+		manager.BroadcastSwitch(profile, origin)
 	}
 }

@@ -11,10 +11,21 @@ package hotkey
 // Forward declaration of the callback
 CGEventRef eventCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon);
 
+// Global reference so the callback can re-enable the tap after macOS disables it
+// (e.g. sleep/wake, screen lock/unlock, or timeout).
+static CFMachPortRef g_eventTap = NULL;
+
+// Re-enable the event tap — called from Go when we receive a disabled event.
+static inline void reEnableEventTap(void) {
+    if (g_eventTap) {
+        CGEventTapEnable(g_eventTap, true);
+    }
+}
+
 // Helper to start the loop - takes uintptr_t to avoid Go unsafe.Pointer conversion
 static inline void startEventTap(uintptr_t refcon) {
     CGEventMask mask = kCGEventMaskForAllEvents;
-    CFMachPortRef tap = CGEventTapCreate(
+    g_eventTap = CGEventTapCreate(
         kCGSessionEventTap,
         kCGHeadInsertEventTap,
         kCGEventTapOptionListenOnly,
@@ -23,14 +34,14 @@ static inline void startEventTap(uintptr_t refcon) {
         (void*)refcon
     );
 
-    if (!tap) {
+    if (!g_eventTap) {
         printf("Hotkey Engine: ERROR! Failed to create CGEventTap. Accessibility permissions missing?\n");
         return;
     }
 
-    CFRunLoopSourceRef source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
+    CFRunLoopSourceRef source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, g_eventTap, 0);
     CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
-    CGEventTapEnable(tap, true);
+    CGEventTapEnable(g_eventTap, true);
     printf("Hotkey Engine: CGEventTap successfully initialized.\n");
     CFRunLoopRun();
 }
@@ -46,6 +57,14 @@ import (
 
 //export eventCallback
 func eventCallback(proxy C.CGEventTapProxy, eventType C.CGEventType, event C.CGEventRef, refcon unsafe.Pointer) C.CGEventRef {
+	// If the tap was disabled by macOS (sleep/wake, lock screen, timeout),
+	// re-enable it immediately so hotkeys keep working.
+	if eventType == C.kCGEventTapDisabledByTimeout || eventType == C.kCGEventTapDisabledByUserInput {
+		log.Println("Hotkey Engine: CGEventTap was disabled by macOS, re-enabling...")
+		C.reEnableEventTap()
+		return event
+	}
+
 	h := cgo.Handle(uintptr(refcon))
 	m := h.Value().(*Manager)
 

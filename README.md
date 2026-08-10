@@ -103,13 +103,49 @@ Right-click the system tray icon to:
 
 1. **Host Machine** (main controller):
    - Set Role: `Host`
-   - Enable API Server
+   - Explicitly enable the API server
+   - Set a high-entropy `API Token`; the API will not start without one
 
 2. **Agent Machines** (controlled computers):
    - Set Role: `Agent`
    - Enter Host's IP:Port in "Coordinator Address"
+   - Use the same API Token as the Host
    
 Agent machines will auto-sync profiles from the Host.
+
+> ⚠️ API access and USB input forwarding are disabled by default. Enable them only after pairing the machines on a trusted network; HTTP, WebSocket, and UDP control paths all require authentication.
+
+`Start on boot` installs the interactive user-session launcher (macOS
+LaunchAgent or Windows per-user Run entry). The service keeps the agent's
+authenticated WebSocket dormant when its coordinator is not reachable and
+wakes it after a network fingerprint change; UDP heartbeat loss automatically
+falls back to WebSocket. The current forwarding path is software input
+capture/injection, not a USB/IP device and cannot emulate Secure Input or a
+real HID descriptor.
+
+On Windows, the installer also provides a non-interactive `VKVMCore` SCM
+service (`vkvm.exe --service`) for authenticated networking and supervision;
+the per-user `vkvm.exe --companion` process remains responsible for tray, hooks
+and interactive permissions. It does not bind a second API/UDP listener.
+
+The USB/BLE feasibility decision and hardware-gated follow-up path are
+documented in [`docs/USB_HID_BLE_FEASIBILITY.md`](docs/USB_HID_BLE_FEASIBILITY.md).
+See [`docs/INSTALL.md`](docs/INSTALL.md) for setup and
+[`docs/API.md`](docs/API.md) for the authenticated API surface.
+
+Changes to the API port, role, coordinator address, or API token take effect
+on the next service restart; the UI preserves the existing token when its
+redacted configuration snapshot is saved.
+
+Authenticated `GET /api/metrics` returns bounded receive/injection counters,
+queue depth, p50/p95/p99 samples, clock/path-offset samples, jitter and
+sequence-gap loss. Acceptance thresholds remain operator-supplied from a
+real Windows/macOS hardware baseline.
+
+Agent discovery is pairing-first: it tries each paired last-known endpoint,
+then performs one bounded `_vkvm._tcp` mDNS lookup after boot or a network
+fingerprint change. If no single paired UUID/public-key match is available it
+enters `WaitingForNetworkChange` instead of continuously scanning the LAN.
 
 ## Hotkey Examples
 

@@ -31,7 +31,15 @@ func (i *Injector) InjectKey(keyCode uint16, pressed bool, modifiers uint16) err
 	return fmt.Errorf("input injection not supported on this platform")
 }
 
+func (i *Injector) InjectKeyEvent(keyCode, scanCode uint16, extended, e1, pressed bool, modifiers uint16) error {
+	return fmt.Errorf("input injection not supported on this platform")
+}
+
 // InjectMouseWheel injects a mouse wheel event (stub)
 func (i *Injector) InjectMouseWheel(deltaY, deltaX int) error {
+	return fmt.Errorf("input injection not supported on this platform")
+}
+
+func (i *Injector) ReleaseAll() error {
 	return fmt.Errorf("input injection not supported on this platform")
 }

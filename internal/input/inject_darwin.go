@@ -5,6 +5,7 @@ package input
 import (
 	"fmt"
 	"log"
+	"sync"
 )
 
 /*
@@ -160,11 +161,11 @@ void injectMouseButton(int button, bool pressed) {
 // Scroll wheel injection: vertical and horizontal
 void injectMouseWheel(int deltaY, int deltaX) {
     // Windows WHEEL_DELTA is 120 per notch.
-    // Use pixel-based scrolling for smoother, natural-feeling distance on macOS.
-    // Multiplier 3 ≈ 3 pixels per Windows delta unit, so one notch (120) ≈ 360px —
-    // close to macOS trackpad "one swipe" feel. Adjust if needed.
-    int32_t scrollPixelsY = (deltaY * 3);
-    int32_t scrollPixelsX = (deltaX * 3);
+    // The caller applies the configured wheel calibration before reaching
+    // CoreGraphics; keep this backend unit-neutral instead of hard-coding a
+    // platform-specific multiplier.
+    int32_t scrollPixelsY = deltaY;
+    int32_t scrollPixelsX = deltaX;
 
     // Handle vertical scroll
     if (scrollPixelsY != 0) {
@@ -413,12 +414,25 @@ var windowsToMacKeyMap = map[uint16]uint16{
 
 // Injector represents a macOS input injector
 type Injector struct {
-	modifierState uint16 // Track current modifier state
+	stateMu        sync.Mutex
+	modifierState  uint16 // Track current modifier state
+	pressedKeys    map[physicalKey]struct{}
+	pressedButtons map[int]struct{}
+}
+
+type physicalKey struct {
+	keyCode  uint16
+	scanCode uint16
+	extended bool
+	e1       bool
 }
 
 // NewInjector creates a new input injector for macOS
 func NewInjector() *Injector {
-	return &Injector{}
+	return &Injector{
+		pressedKeys:    make(map[physicalKey]struct{}),
+		pressedButtons: make(map[int]struct{}),
+	}
 }
 
 // InjectMouseMove injects a mouse movement event
@@ -438,6 +452,14 @@ func (i *Injector) InjectMouseButton(button int, pressed bool) error {
 	if button < 1 || button > 5 {
 		return fmt.Errorf("invalid button number: %d", button)
 	}
+
+	i.stateMu.Lock()
+	if pressed {
+		i.pressedButtons[button] = struct{}{}
+	} else {
+		delete(i.pressedButtons, button)
+	}
+	i.stateMu.Unlock()
 
 	var cPressed C.bool
 	if pressed {
@@ -460,12 +482,59 @@ func (i *Injector) InjectMouseWheel(deltaY, deltaX int) error {
 
 // InjectKey injects a keyboard event
 func (i *Injector) InjectKey(keyCode uint16, pressed bool, modifiers uint16) error {
-	macKeyCode, ok := windowsToMacKeyMap[keyCode]
+	return i.InjectKeyEvent(keyCode, 0, false, false, pressed, modifiers)
+}
+
+// macKeyCodeForEvent prefers the physical scan code for the generic Windows
+// modifier VK values. Raw Input reports VK_SHIFT/VK_CONTROL/VK_MENU for both
+// sides, so a virtual-key-only lookup would turn right-side modifiers into
+// left-side events on macOS.
+func macKeyCodeForEvent(keyCode, scanCode uint16, extended bool) (uint16, bool) {
+	switch keyCode {
+	case 0x10: // VK_SHIFT
+		if scanCode == 0x36 {
+			return 0x3C, true // kVK_RightShift
+		}
+		return 0x38, true // kVK_Shift
+	case 0x11: // VK_CONTROL
+		if extended {
+			return 0x3E, true // kVK_RightControl
+		}
+		return 0x3B, true // kVK_Control
+	case 0x12: // VK_MENU/Alt
+		if extended {
+			return 0x3D, true // kVK_RightOption
+		}
+		return 0x3A, true // kVK_Option
+	default:
+		macKeyCode, ok := windowsToMacKeyMap[keyCode]
+		return macKeyCode, ok
+	}
+}
+
+// InjectKeyEvent injects a keyboard event while retaining its physical
+// scan-code identity for release-all recovery.
+func (i *Injector) InjectKeyEvent(keyCode, scanCode uint16, extended, e1, pressed bool, modifiers uint16) error {
+	macKeyCode, ok := macKeyCodeForEvent(keyCode, scanCode, extended)
 	if !ok {
 		log.Printf("Warning: unmapped key code 0x%X", keyCode)
 		return fmt.Errorf("unmapped key code: 0x%X", keyCode)
 	}
 
+	physical := physicalKey{keyCode: keyCode, scanCode: scanCode, extended: extended, e1: e1}
+	i.stateMu.Lock()
+	if pressed {
+		i.pressedKeys[physical] = struct{}{}
+	} else {
+		delete(i.pressedKeys, physical)
+		// A legacy release may not include scan metadata. Remove any matching
+		// physical entry so recovery does not keep a phantom pressed key.
+		for key := range i.pressedKeys {
+			if key.keyCode == keyCode {
+				delete(i.pressedKeys, key)
+			}
+		}
+	}
 	// Update local modifier state
 	switch keyCode {
 	case 0x10, 0xA0, 0xA1: // Shift keys
@@ -494,8 +563,41 @@ func (i *Injector) InjectKey(keyCode uint16, pressed bool, modifiers uint16) err
 		}
 	}
 
+	modifierState := i.modifierState
+	i.stateMu.Unlock()
+
 	// Use the C function for injection with local modifier state
-	C.injectKey(C.CGKeyCode(macKeyCode), C.bool(pressed), C.uint16(i.modifierState))
+	C.injectKey(C.CGKeyCode(macKeyCode), C.bool(pressed), C.uint16(modifierState))
+	return nil
+}
+
+// ReleaseAll synthesizes release events for every key/button this injector
+// has emitted. This prevents a dropped packet or transport disconnect from
+// leaving the interactive session stuck in a pressed state.
+func (i *Injector) ReleaseAll() error {
+	i.stateMu.Lock()
+	keys := make([]physicalKey, 0, len(i.pressedKeys))
+	for key := range i.pressedKeys {
+		keys = append(keys, key)
+	}
+	buttons := make([]int, 0, len(i.pressedButtons))
+	for button := range i.pressedButtons {
+		buttons = append(buttons, button)
+	}
+	i.pressedKeys = make(map[physicalKey]struct{})
+	i.pressedButtons = make(map[int]struct{})
+	i.modifierState = 0
+	i.stateMu.Unlock()
+
+	for _, key := range keys {
+		macKeyCode, ok := macKeyCodeForEvent(key.keyCode, key.scanCode, key.extended)
+		if ok {
+			C.injectKey(C.CGKeyCode(macKeyCode), C.bool(false), 0)
+		}
+	}
+	for _, button := range buttons {
+		C.injectMouseButton(C.int(button), C.bool(false))
+	}
 	return nil
 }
 

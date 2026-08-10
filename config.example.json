@@ -33,9 +33,10 @@
     "start_minimized": true,
     "show_notifications": true,
     "current_profile": "Mac",
-    "api_enabled": true,
+    "api_enabled": false,
     "api_port": 18080,
-    "api_token": "",
+    "api_token": "generate-a-long-random-token",
+    "usb_forwarding_enabled": false,
     "sleep_hotkey": "Ctrl+Alt+P"
   }
 }

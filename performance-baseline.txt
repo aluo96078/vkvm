@@ -1,0 +1,17 @@
+VKVM performance baseline
+version=0.2.0
+go=go version go1.25.0 darwin/arm64
+platform=darwin/arm64
+captured=2026-08-09T12:30:45Z
+goos: darwin
+goarch: arm64
+pkg: vkvm/internal/input
+cpu: Apple M4 Pro
+BenchmarkInputMetricsPayload-12     	16118876	        69.06 ns/op
+BenchmarkInputMetricsPayload-12     	17045332	        69.40 ns/op
+BenchmarkInputMetricsPayload-12     	17130661	        69.90 ns/op
+BenchmarkInjectionQueueSubmit-12    	81835616	        14.30 ns/op
+BenchmarkInjectionQueueSubmit-12    	86831722	        14.17 ns/op
+BenchmarkInjectionQueueSubmit-12    	84041952	        14.54 ns/op
+PASS
+ok  	vkvm/internal/input	7.535s

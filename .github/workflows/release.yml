@@ -14,7 +14,52 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './vendor/*'))"
+
+      - name: Run tests with race detector
+        run: go test -race ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Report coverage
+        run: go test -cover ./...
+
+      - name: Enforce deterministic core coverage
+        run: packaging/coverage-gate.sh "$RUNNER_TEMP/vkvm-coverage.out"
+
+      - name: Verify packaging and release metadata
+        run: |
+          packaging/verify-package.sh
+          packaging/release.sh --check
+
+      - name: Run portable integration smoke tests
+        run: go test -count=1 ./internal/integration
+
+      - name: Run HID/service/network acceptance contracts
+        run: |
+          hardware/accept-hid.sh portable
+          packaging/platform-acceptance.sh portable
+          packaging/network-trace.sh portable
+
+      - name: Capture performance baseline
+        run: packaging/perf-baseline.sh "$RUNNER_TEMP/vkvm-performance-baseline.txt"
+
   build-macos:
+    needs: validate
     runs-on: macos-14  # Apple Silicon
     steps:
       - name: Checkout code
@@ -23,19 +68,27 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'  # Use stable version
+          go-version: '1.25.x'
 
       - name: Build macOS (arm64 - Apple Silicon)
         run: |
-          CGO_ENABLED=1 GOARCH=arm64 go build -o vkvm-darwin-arm64 ./cmd
+          GOCACHE="$RUNNER_TEMP/vkvm-gocache" packaging/macos/test-dmg.sh
+          CGO_ENABLED=1 GOARCH=arm64 go build -trimpath -o vkvm ./cmd
+          codesign --force --sign - vkvm
+          cp vkvm vkvm-darwin-arm64
+          GOCACHE="$RUNNER_TEMP/vkvm-gocache" packaging/macos/build-dmg.sh "$RUNNER_TEMP/vkvm-dmg"
+          cp "$RUNNER_TEMP/vkvm-dmg/VKVM.dmg" vkvm-darwin-arm64.dmg
 
-      - name: Upload artifact
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: vkvm-darwin-arm64
-          path: vkvm-darwin-arm64
+          path: |
+            vkvm-darwin-arm64
+            vkvm-darwin-arm64.dmg
 
   build-windows:
+    needs: validate
     runs-on: windows-latest
     steps:
       - name: Checkout code
@@ -44,17 +97,23 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.25.x'
 
       - name: Build Windows (amd64)
         run: |
-          go build -ldflags "-H windowsgui" -o vkvm.exe ./cmd
+          choco install nsis -y --no-progress
+          New-Item -ItemType Directory -Force dist | Out-Null
+          go build -trimpath -ldflags "-H windowsgui" -o dist\vkvm.exe ./cmd
+          powershell -ExecutionPolicy Bypass -File packaging\windows\test-installer.ps1
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" packaging\windows\vkvm.nsi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: vkvm-windows-amd64
-          path: vkvm.exe
+          path: |
+            dist\vkvm.exe
+            VKVM-Setup.exe
 
   release:
     needs: [build-macos, build-windows]
@@ -72,7 +131,10 @@ jobs:
         run: |
           mkdir -p release
           cp artifacts/vkvm-darwin-arm64/vkvm-darwin-arm64 release/
-          cp artifacts/vkvm-windows-amd64/vkvm.exe release/
+          cp artifacts/vkvm-darwin-arm64/vkvm-darwin-arm64.dmg release/
+          cp artifacts/vkvm-windows-amd64/dist/vkvm.exe release/
+          cp artifacts/vkvm-windows-amd64/VKVM-Setup.exe release/
+          (cd release && sha256sum vkvm-darwin-arm64 vkvm-darwin-arm64.dmg vkvm.exe VKVM-Setup.exe > SHA256SUMS)
           ls -la release/
 
       - name: Upload to Release (on tag push)
@@ -81,7 +143,10 @@ jobs:
         with:
           files: |
             release/vkvm-darwin-arm64
+            release/vkvm-darwin-arm64.dmg
             release/vkvm.exe
+            release/VKVM-Setup.exe
+            release/SHA256SUMS
 
       - name: Upload to Release (manual with tag)
         if: github.event_name == 'workflow_dispatch' && inputs.tag_name != ''
@@ -90,4 +155,7 @@ jobs:
           tag_name: ${{ inputs.tag_name }}
           files: |
             release/vkvm-darwin-arm64
+            release/vkvm-darwin-arm64.dmg
             release/vkvm.exe
+            release/VKVM-Setup.exe
+            release/SHA256SUMS

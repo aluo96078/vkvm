@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WiX v4 source for environments that choose MSI instead of NSIS. The
+     release workflow uses NSIS for a deterministic public artifact; this
+     source keeps the same service policy available to enterprise packaging. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="VKVM" Manufacturer="VKVM" Version="$(var.ProductVersion)" UpgradeCode="6C4C52E4-2F38-4C26-8C54-8D9BFA6E2F40">
+    <MajorUpgrade DowngradeErrorMessage="A newer VKVM version is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Feature Id="Main" Title="VKVM" Level="1">
+      <ComponentGroupRef Id="MainFiles" />
+    </Feature>
+  </Package>
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="VKVM" />
+    </StandardDirectory>
+  </Fragment>
+  <Fragment>
+    <ComponentGroup Id="MainFiles" Directory="INSTALLFOLDER">
+      <Component Id="CoreExecutable" Guid="*">
+        <File Id="vkvm.exe" Source="dist\vkvm.exe" KeyPath="yes" />
+        <ServiceInstall Id="VKVMCoreInstall" Name="VKVMCore" DisplayName="VKVM Core" Start="auto" StartType="auto" ErrorControl="normal" Arguments="--service" />
+        <ServiceControl Id="VKVMCoreControl" Name="VKVMCore" Start="install" Stop="both" Remove="uninstall" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

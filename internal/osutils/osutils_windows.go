@@ -21,7 +21,7 @@ const (
 
 var (
 	// Reuse user32 from wake_windows.go if available, otherwise redefine here locally if needed.
-	// Since order of init is not guaranteed, safer to load what we need or use the one from wake_windows.go 
+	// Since order of init is not guaranteed, safer to load what we need or use the one from wake_windows.go
 	// assuming it's package level. But wake_windows.go vars are unexported (lowercase user32).
 	// So we should define our own to be safe and independent.
 	modUser32        = syscall.NewLazyDLL("user32.dll")
