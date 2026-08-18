@@ -1159,7 +1159,10 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
         async function switchToProfile(name) {
             try {
                 const res = await fetch('/api/switch?profile=' + encodeURIComponent(name), {method: 'POST'});
-                if (!res.ok) throw new Error('Switch failed');
+                if (!res.ok) {
+                    const message = await res.text();
+                    throw new Error(message.trim() || 'Switch failed');
+                }
                 showStatus('Switched to ' + name);
             } catch (e) {
                 showStatus('Switch failed: ' + e.message, true);
