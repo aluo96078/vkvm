@@ -329,11 +329,13 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 		s.mu.Unlock()
 		if client != nil {
 			log.Printf("Switcher: Operating as Agent, forwarding switch request '%s' to Host via WebSocket", profileName)
-			client.SendSwitch(profileName)
+			if err := client.SendSwitch(profileName); err != nil {
+				return fmt.Errorf("failed to forward switch request to Host: %w", err)
+			}
+			return nil
 		} else {
-			log.Printf("Switcher: Error: Agent role but no WebSocket client available")
+			return fmt.Errorf("failed to forward switch request to Host: WebSocket client unavailable")
 		}
-		return nil
 	}
 
 	var lastErr error

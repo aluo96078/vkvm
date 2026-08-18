@@ -596,15 +596,32 @@ func (c *WSClient) SetReleaseHandler(callback func()) {
 	c.callbackMu.Unlock()
 }
 
-// SendSwitch sends a switch request to host
-func (c *WSClient) SendSwitch(profile string) {
-	c.enqueue(protocol.Message{
+// SendSwitch sends a switch request to Host. It fails fast when the
+// authenticated transport is unavailable so callers cannot report a local
+// switch as successful while the request is only sitting in a disconnected
+// queue.
+func (c *WSClient) SendSwitch(profile string) error {
+	c.mu.Lock()
+	connected := c.isConnected
+	state := c.state
+	lastError := c.lastError
+	c.mu.Unlock()
+	if !connected {
+		if lastError != "" {
+			return fmt.Errorf("Host connection unavailable (%s): %s", state, lastError)
+		}
+		return fmt.Errorf("Host connection unavailable (state: %s)", state)
+	}
+	if !c.enqueue(protocol.Message{
 		Type: protocol.TypeSwitch,
 		Payload: protocol.SwitchPayload{
 			Profile: profile,
 			Origin:  "agent", // Host will replace with actual IP if needed
 		},
-	})
+	}) {
+		return fmt.Errorf("Host switch request queue is unavailable")
+	}
+	return nil
 }
 
 // SendSyncRequest asks host for config
@@ -633,12 +650,15 @@ func (c *WSClient) SendInputEvent(eventType string, deltaX, deltaY int, button i
 	})
 }
 
-func (c *WSClient) enqueue(message protocol.Message) {
+func (c *WSClient) enqueue(message protocol.Message) bool {
 	select {
 	case c.send <- message:
+		return true
 	case <-c.done:
+		return false
 	default:
 		log.Printf("WS Client: dropping outbound %s message because queue is full", message.Type)
+		return false
 	}
 }
 
