@@ -659,6 +659,13 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                     <input type="text" id="api-port" onchange="updateGeneralConfig()" placeholder="18080">
                 </div>
             </div>
+            <div class="input-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 0.75rem;">
+                <div class="input-group">
+                    <label>API Token:</label>
+                    <input type="password" id="api-token" onchange="updateGeneralConfig()" placeholder="Required when API is enabled" autocomplete="new-password">
+                    <small style="color: #94a3b8; font-size: 0.8rem; margin-top: 0.25rem;">Leave blank to keep the saved token. Use the same token on paired agents.</small>
+                </div>
+            </div>
             <div class="input-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
                 <div class="input-group">
                     <label>This Computer IP:</label>
@@ -868,6 +875,7 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
         function renderGeneral() {
             document.getElementById('api-enabled').checked = config.general.api_enabled;
             document.getElementById('api-port').value = config.general.api_port || 18080;
+            document.getElementById('api-token').value = config.general.api_token || '';
             document.getElementById('this-computer-ip').value = config.general.this_computer_ip || '';
             document.getElementById('start-on-boot').checked = config.general.start_on_boot;
             document.getElementById('settings-hotkey').value = config.general.settings_hotkey || 'Ctrl+Alt+S';
@@ -906,6 +914,10 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
         function updateGeneralConfig() {
             config.general.api_enabled = document.getElementById('api-enabled').checked;
             config.general.api_port = parseInt(document.getElementById('api-port').value) || 18080;
+            const apiToken = document.getElementById('api-token').value.trim();
+            if (apiToken !== '') {
+                config.general.api_token = apiToken;
+            }
             config.general.this_computer_ip = document.getElementById('this-computer-ip').value;
             config.general.start_on_boot = document.getElementById('start-on-boot').checked;
             config.general.settings_hotkey = document.getElementById('settings-hotkey').value;
@@ -1174,7 +1186,10 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(config)
                 });
-                if (!res.ok) throw new Error('Save failed');
+                if (!res.ok) {
+                    const message = await res.text();
+                    throw new Error(message.trim() || 'Save failed');
+                }
                 const result = await res.json();
                 const restartRequired = Array.isArray(result.restart_required) ? result.restart_required : [];
                 if (restartRequired.length > 0) {

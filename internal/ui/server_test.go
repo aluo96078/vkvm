@@ -72,3 +72,12 @@ func TestConfigSaveHandlerForwardsSnapshot(t *testing.T) {
 		t.Fatalf("local config profile=%q", got)
 	}
 }
+
+func TestSettingsTemplateIncludesAPITokenField(t *testing.T) {
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	(&Server{}).handleIndex(resp, req)
+	if resp.Code != http.StatusOK || !bytes.Contains(resp.Body.Bytes(), []byte(`id="api-token"`)) {
+		t.Fatal("settings template does not expose an API token field")
+	}
+}
