@@ -341,26 +341,54 @@ func (s *Server) handleSyncTo(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("UI: Syncing local config to %s", validatedAddr)
 
-	cfg := s.configMgr.Get()
-	// Never send the local API secret as part of a configuration sync.
-	cfg.General.APIToken = ""
-	// The identity private key is local-only; the peer only needs its public key
-	// through an explicit pairing operation.
-	cfg.General.IdentityPrivateKey = ""
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		http.Error(w, "Failed to encode config", http.StatusInternalServerError)
-		return
-	}
-
-	// Create request to target machine's Remote API
 	token := r.URL.Query().Get("token")
 	if token == "" {
 		token = s.configMgr.Get().General.APIToken
 	}
 	targetURL := fmt.Sprintf("http://%s/api/config", validatedAddr)
+	client := &http.Client{Timeout: 5 * time.Second}
 
-	req, err := http.NewRequest("POST", targetURL, bytes.NewBuffer(data))
+	// Read the target snapshot first. A full local snapshot must never replace
+	// the target's machine identity, role, coordinator, API listener, or peer
+	// allowlist; doing so can turn a Host into an Agent and duplicate device IDs.
+	getReq, err := http.NewRequest(http.MethodGet, targetURL, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if token != "" {
+		getReq.Header.Set("Authorization", "Bearer "+token)
+	}
+	getResp, err := client.Do(getReq)
+	if err != nil {
+		log.Printf("UI: Sync target read failed: %v", err)
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	var targetCfg config.Config
+	decodeErr := json.NewDecoder(getResp.Body).Decode(&targetCfg)
+	getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		http.Error(w, fmt.Sprintf("Target returned status %d while reading configuration", getResp.StatusCode), http.StatusBadGateway)
+		return
+	}
+	if decodeErr != nil {
+		http.Error(w, "Target returned invalid configuration", http.StatusBadGateway)
+		return
+	}
+
+	localCfg := s.configMgr.Get()
+	// Synchronize the portable profile/monitor data only. All transport and
+	// machine-local settings stay owned by the target process.
+	targetCfg.Profiles = localCfg.Profiles
+	targetCfg.Monitors = localCfg.Monitors
+	data, err := json.Marshal(targetCfg)
+	if err != nil {
+		http.Error(w, "Failed to encode config", http.StatusInternalServerError)
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewBuffer(data))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -370,7 +398,6 @@ func (s *Server) handleSyncTo(w http.ResponseWriter, r *http.Request) {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("UI: Sync failed: %v", err)
@@ -1115,7 +1142,7 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                         </div>
                         <div style="display: flex; gap: 0.5rem; align-items: center;">
                             <button class="btn btn-small btn-secondary" ${h.role && h.role !== 'host' ? 'disabled title="Only a Host can be a coordinator"' : ''} onclick="addRemoteFromDiscovery(${jsArg(h.ip + ':' + h.port)})">Add as Remote</button>
-                            <button class="btn btn-small" style="background: #4f46e5;" ${h.role && h.role !== 'host' ? 'disabled title="Only a Host can be a coordinator"' : ''} onclick="syncConfigTo(${jsArg(h.ip + ':' + h.port)})">☁️ Sync Config</button>
+                            <button class="btn btn-small" style="background: #4f46e5;" ${h.role && h.role !== 'host' ? 'disabled title="Only a Host can be a coordinator"' : ''} onclick="syncConfigTo(${jsArg(h.ip + ':' + h.port)})">☁️ Sync Profiles</button>
                         </div>
                     </div>
                 ` + "`" + `).join('');
@@ -1125,7 +1152,7 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
         }
 
         async function syncConfigTo(addr) {
-            if (!confirm('This will OVERWRITE all settings on ' + addr + ' with your local settings. Continue?')) {
+            if (!confirm('This will sync profiles and monitor mappings to ' + addr + '. Machine identity, role, token, and network settings stay unchanged. Continue?')) {
                 return;
             }
             
