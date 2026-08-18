@@ -6,6 +6,7 @@ package hotkey
 #cgo LDFLAGS: -framework CoreGraphics -framework CoreFoundation -framework ApplicationServices
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <ApplicationServices/ApplicationServices.h>
 #include <stdint.h>
 
 // Forward declaration of the callback
@@ -128,6 +129,13 @@ func eventCallback(proxy C.CGEventTapProxy, eventType C.CGEventType, event C.CGE
 }
 
 func (m *Manager) startPlatform() error {
+	// Creating a global event tap without the corresponding TCC grants can
+	// fail inside CoreGraphics. Keep startup fail-closed and let the UI guide
+	// the user to Accessibility/Input Monitoring instead of invoking the C API.
+	if C.AXIsProcessTrusted() == 0 || !bool(C.CGPreflightListenEventAccess()) {
+		log.Println("Hotkey Engine: Accessibility/Input Monitoring permission missing; hotkeys disabled")
+		return nil
+	}
 	handle := cgo.NewHandle(m)
 	go func() {
 		log.Println("Hotkey Engine: macOS CGEventTap started.")

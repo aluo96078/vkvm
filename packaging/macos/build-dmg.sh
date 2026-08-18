@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-# Reproducible local packaging helper. Signing/notarization are deliberately
-# supplied by the release environment through CODESIGN_IDENTITY and
-# NOTARY_PROFILE; a developer build remains unsigned and cannot claim a
-# trusted distribution artifact.
+# Reproducible local packaging helper. Release signing/notarization are
+# supplied through CODESIGN_IDENTITY and NOTARY_PROFILE. Local builds receive
+# an ad-hoc bundle signature so LaunchServices can validate the App bundle;
+# this is not a trusted distribution signature.
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 OUT=${1:-"$ROOT/dist"}
 PORTABLE=0
@@ -23,14 +23,24 @@ cat > "$OUT/stage/VKVM.app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
+<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 <key>CFBundleIdentifier</key><string>com.vkvm.app</string>
 <key>CFBundleName</key><string>VKVM</string>
 <key>CFBundleExecutable</key><string>vkvm</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>$VERSION</string>
 <key>CFBundleVersion</key><string>$VERSION</string>
+<key>LSUIElement</key><true/>
+<key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
 if [ -n "${CODESIGN_IDENTITY:-}" ]; then
   codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$OUT/stage/VKVM.app"
+else
+  # Keep local .app bundles structurally signed. Gatekeeper still requires a
+  # Developer ID signature for distribution, but an unsigned bundle is
+  # rejected by LaunchServices before the user can grant TCC permissions.
+  codesign --force --deep --sign - "$OUT/stage/VKVM.app"
 fi
 if [ "$PORTABLE" -eq 1 ]; then
   tar -czf "$OUT/VKVM.app.tar.gz" -C "$OUT/stage" VKVM.app
