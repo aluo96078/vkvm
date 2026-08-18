@@ -43,6 +43,7 @@ var (
 	testInput     = flag.Bool("test-input", false, "Test input capture and forwarding")
 	serviceMode   = flag.Bool("service", false, "Run the non-interactive core under the platform service manager")
 	companionMode = flag.Bool("companion", false, "Run only the logged-in user companion and connect to the core over local IPC")
+	installMode   = flag.Bool("enable-autostart", false, "Enable the interactive companion autostart entry during installation")
 )
 
 func main() {
@@ -83,6 +84,19 @@ func main() {
 	// Handle --test-input flag
 	if *testInput {
 		runInputTest(cfgMgr)
+		return
+	}
+	if *installMode {
+		cfg := cfgMgr.Get()
+		cfg.General.StartOnBoot = true
+		cfgMgr.Set(cfg)
+		if err := cfgMgr.Save(); err != nil {
+			log.Fatalf("Failed to persist installer startup setting: %v", err)
+		}
+		if err := autostart.Enable(); err != nil {
+			log.Fatalf("Failed to enable installer startup entry: %v", err)
+		}
+		log.Println("Installer startup entry enabled")
 		return
 	}
 	if *serviceMode {
@@ -139,6 +153,10 @@ func handleSwitch(cfgMgr *config.Manager, profileName string) {
 }
 
 func runUI(cfgMgr *config.Manager) {
+	runUIWithHandlers(cfgMgr, nil, nil)
+}
+
+func runUIWithHandlers(cfgMgr *config.Manager, onConfigSaved func(*config.Config) error, onSwitchProfile func(string) error) {
 	// Create switcher for the UI
 	sw, err := switcher.New(cfgMgr)
 	if err != nil {
@@ -148,6 +166,8 @@ func runUI(cfgMgr *config.Manager) {
 
 	// Start the UI server
 	server := ui.NewServer(cfgMgr, sw)
+	server.SetConfigSaveHandler(onConfigSaved)
+	server.SetSwitchHandler(onSwitchProfile)
 	log.Println("Starting configuration UI...")
 
 	// Check if running from CLI (blocking mode) or from tray (non-blocking)
@@ -223,6 +243,48 @@ func runCompanion(cfgMgr *config.Manager) {
 	}
 
 	cfg := cfgMgr.Get()
+	syncConfigToCore := func(current *config.Config) error {
+		if current == nil {
+			return errors.New("configuration is nil")
+		}
+		data, err := json.Marshal(current)
+		if err != nil {
+			return err
+		}
+		_, err = call(service.IPCEnvelope{Type: "config_set", RequestID: "companion-config-sync", Payload: data})
+		return err
+	}
+	if err := syncConfigToCore(cfg); err != nil {
+		log.Printf("Companion: initial configuration sync failed: %v", err)
+		return
+	}
+	if runtime.GOOS == "windows" {
+		applyCompanionAutostart := func() {
+			current := cfgMgr.Get()
+			var err error
+			if current.General.StartOnBoot {
+				err = autostart.Enable()
+			} else if autostart.IsEnabled() {
+				err = autostart.Disable()
+			}
+			if err != nil {
+				log.Printf("Companion: failed to apply start_on_boot=%v: %v", current.General.StartOnBoot, err)
+			}
+		}
+		cfgMgr.RegisterChangeCallback(applyCompanionAutostart)
+		applyCompanionAutostart()
+	}
+	switchProfileViaCore := func(profileName string) error {
+		data, err := json.Marshal(map[string]string{"profile": profileName})
+		if err != nil {
+			return err
+		}
+		_, err = call(service.IPCEnvelope{Type: "switch", RequestID: "companion-ui-switch", Payload: data})
+		return err
+	}
+	openCompanionSettings := func() {
+		go runUIWithHandlers(cfgMgr, syncConfigToCore, switchProfileViaCore)
+	}
 	var trap *input.Trap
 	var injector *input.Injector
 	var inputQueue *input.InjectionQueue
@@ -353,7 +415,7 @@ func runCompanion(cfgMgr *config.Manager) {
 			hkMgr,
 			current,
 			debounce,
-			func() { go runUI(cfgMgr) },
+			openCompanionSettings,
 			func() {
 				go func() {
 					time.Sleep(500 * time.Millisecond)
@@ -371,11 +433,7 @@ func runCompanion(cfgMgr *config.Manager) {
 				}
 			},
 			func(profileName string) {
-				data, err := json.Marshal(map[string]string{"profile": profileName})
-				if err != nil {
-					return
-				}
-				if _, err := call(service.IPCEnvelope{Type: "switch", RequestID: "companion-hotkey-switch", Payload: data}); err != nil {
+				if err := switchProfileViaCore(profileName); err != nil {
 					log.Printf("Companion: hotkey switch %q failed: %v", profileName, err)
 				}
 			},
@@ -388,17 +446,13 @@ func runCompanion(cfgMgr *config.Manager) {
 	for _, profile := range cfg.Profiles {
 		profileName := profile.Name
 		trayApp.AddMenuItem(fmt.Sprintf("Switch to %s", profileName), func() {
-			data, marshalErr := json.Marshal(map[string]string{"profile": profileName})
-			if marshalErr != nil {
-				return
-			}
-			if _, callErr := call(service.IPCEnvelope{Type: "switch", RequestID: "companion-switch", Payload: data}); callErr != nil {
+			if callErr := switchProfileViaCore(profileName); callErr != nil {
 				log.Printf("Companion: switch %q failed: %v", profileName, callErr)
 			}
 		})
 	}
 	trayApp.AddSeparator()
-	trayApp.AddMenuItem("Settings...", func() { go runUI(cfgMgr) })
+	trayApp.AddMenuItem("Settings...", openCompanionSettings)
 	trayApp.AddSeparator()
 	trayApp.AddMenuItem("Quit", func() { cancel(); trayApp.Stop() })
 	go func() {
@@ -694,6 +748,28 @@ func runServiceContextMode(cfgMgr *config.Manager, parent context.Context, inter
 		baseHandler := service.DiagnosticIPCHandler(version, serviceStatus.Snapshot)
 		companionHandler := func(ctx context.Context, request service.IPCEnvelope) (service.IPCEnvelope, error) {
 			switch request.Type {
+			case "config_set":
+				var incoming config.Config
+				if json.Unmarshal(request.Payload, &incoming) != nil {
+					return service.IPCEnvelope{}, errors.New("invalid configuration payload")
+				}
+				if incoming.General.DeviceID == "" || incoming.General.IdentityPrivateKey == "" {
+					return service.IPCEnvelope{}, errors.New("configuration identity is missing")
+				}
+				current := cfgMgr.Get()
+				if incoming.General.APIEnabled && incoming.General.APIToken == "" {
+					return service.IPCEnvelope{}, errors.New("api_token is required when api_enabled is true")
+				}
+				change := config.ClassifyChange(current, &incoming)
+				cfgMgr.Set(&incoming)
+				if err := cfgMgr.Save(); err != nil {
+					return service.IPCEnvelope{}, fmt.Errorf("save configuration: %w", err)
+				}
+				data, err := json.Marshal(change)
+				if err != nil {
+					return service.IPCEnvelope{}, err
+				}
+				return service.IPCEnvelope{Type: "config_saved", RequestID: request.RequestID, Payload: data}, nil
 			case "switch":
 				var payload struct {
 					Profile string `json:"profile"`
@@ -767,8 +843,13 @@ func runServiceContextMode(cfgMgr *config.Manager, parent context.Context, inter
 			log.Printf("Autostart: failed to apply start_on_boot=%v: %v", current.General.StartOnBoot, err)
 		}
 	}
-	applyAutostart()
-	cfgMgr.RegisterChangeCallback(applyAutostart)
+	// The Windows SCM core runs as LocalSystem and must never write HKCU for
+	// the logged-in user. The companion/installer owns that per-user startup
+	// entry; other interactive platforms keep the legacy in-process behavior.
+	if runtime.GOOS != "windows" || interactive {
+		applyAutostart()
+		cfgMgr.RegisterChangeCallback(applyAutostart)
+	}
 	var tokenMu sync.Mutex
 	lastAPIToken := cfg.General.APIToken
 	applyTransportToken := func() {
@@ -861,23 +942,6 @@ func runServiceContextMode(cfgMgr *config.Manager, parent context.Context, inter
 			return nil
 		}
 		companionForwardMu.Unlock()
-
-		// Wire up switcher -> api broadcast for WebSocket
-		sw.SetOnSwitch(func(profileName string) {
-			queueCompanionEvent("switch", map[string]string{"profile": profileName})
-			// Broadcast the switch event to all connected agents
-			// Origin is "host" because this callback is triggered by a local decision/action on the host
-			// (or a successfully processed agent request)
-			apiServer.BroadcastSwitch(profileName, "host")
-
-			// Local logic for host: control input capture based on active profile
-			currentCfg := cfgMgr.Get()
-			if currentCfg.General.Role == "host" && inputTrap != nil && currentCfg.General.AgentProfile != "" {
-				allowCapture := input.CurrentPermissions().CanCapture() && (profileName == currentCfg.General.AgentProfile)
-				log.Printf("Switch to profile '%s', agent profile '%s', allow capture: %v", profileName, currentCfg.General.AgentProfile, allowCapture)
-				inputTrap.EnableCapture(allowCapture)
-			}
-		})
 
 		apiPort := cfg.General.APIPort
 		apiSupervisor := service.NewSupervisor(
@@ -1000,6 +1064,27 @@ func runServiceContextMode(cfgMgr *config.Manager, parent context.Context, inter
 			}
 		})
 	}
+
+	// Always notify the logged-in companion about successful local switches.
+	// The UI and hotkeys use the authenticated local IPC path even when the
+	// network API is disabled, so this callback must not depend on apiServer.
+	// When the API is enabled, the same event is also broadcast to remote agents.
+	sw.SetOnSwitch(func(profileName string) {
+		queueCompanionEvent("switch", map[string]string{"profile": profileName})
+		if apiServer != nil {
+			// Origin is "host" because this callback is triggered by a local
+			// decision/action on the host (or a successfully processed request).
+			apiServer.BroadcastSwitch(profileName, "host")
+		}
+
+		// Local logic for host: control input capture based on active profile.
+		currentCfg := cfgMgr.Get()
+		if currentCfg.General.Role == "host" && inputTrap != nil && currentCfg.General.AgentProfile != "" {
+			allowCapture := input.CurrentPermissions().CanCapture() && (profileName == currentCfg.General.AgentProfile)
+			log.Printf("Switch to profile '%s', agent profile '%s', allow capture: %v", profileName, currentCfg.General.AgentProfile, allowCapture)
+			inputTrap.EnableCapture(allowCapture)
+		}
+	})
 
 	// Hotkey manager
 	hkMgr = hotkey.NewManager()

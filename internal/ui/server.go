@@ -28,9 +28,11 @@ import (
 
 // Server provides a web-based configuration UI
 type Server struct {
-	configMgr *config.Manager
-	switcher  *switcher.Switcher
-	listener  net.Listener
+	configMgr       *config.Manager
+	switcher        *switcher.Switcher
+	listener        net.Listener
+	onConfigSaved   func(*config.Config) error
+	onSwitchProfile func(string) error
 }
 
 // NewServer creates a new UI server
@@ -39,6 +41,19 @@ func NewServer(cfgMgr *config.Manager, sw *switcher.Switcher) *Server {
 		configMgr: cfgMgr,
 		switcher:  sw,
 	}
+}
+
+// SetConfigSaveHandler lets a split companion forward an authenticated
+// configuration update to the non-interactive core after saving its local
+// snapshot. A nil handler keeps the standalone desktop behavior.
+func (s *Server) SetConfigSaveHandler(handler func(*config.Config) error) {
+	s.onConfigSaved = handler
+}
+
+// SetSwitchHandler lets a split companion route profile switches through the
+// core instead of mutating a second, process-local switcher state.
+func (s *Server) SetSwitchHandler(handler func(string) error) {
+	s.onSwitchProfile = handler
 }
 
 // Start starts the UI server and opens the browser
@@ -160,6 +175,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if s.onConfigSaved != nil {
+			if err := s.onConfigSaved(&cfg); err != nil {
+				http.Error(w, fmt.Sprintf("core configuration sync failed: %v", err), http.StatusBadGateway)
+				return
+			}
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":              "ok",
 			"applied_immediately": change.Immediate,
@@ -181,15 +202,30 @@ func (s *Server) handleSwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.switcher.SwitchToProfile(profileName); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if s.onSwitchProfile != nil {
+		if err := s.onSwitchProfile(profileName); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+	} else {
+		if s.switcher == nil {
+			http.Error(w, "switcher unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := s.switcher.SwitchToProfile(profileName); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	currentProfile := profileName
+	if s.switcher != nil && s.onSwitchProfile == nil {
+		currentProfile = s.switcher.GetCurrentProfile()
+	}
 	json.NewEncoder(w).Encode(map[string]string{
 		"status":  "ok",
-		"profile": s.switcher.GetCurrentProfile(),
+		"profile": currentProfile,
 	})
 }
 
@@ -1139,7 +1175,13 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                     body: JSON.stringify(config)
                 });
                 if (!res.ok) throw new Error('Save failed');
-                showStatus('Settings saved!');
+                const result = await res.json();
+                const restartRequired = Array.isArray(result.restart_required) ? result.restart_required : [];
+                if (restartRequired.length > 0) {
+                    showStatus('Settings saved. Restart VKVM to apply: ' + restartRequired.join(', '));
+                } else {
+                    showStatus('Settings saved!');
+                }
             } catch (e) {
                 showStatus('Save failed: ' + e.message, true);
             }

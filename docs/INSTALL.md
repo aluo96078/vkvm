@@ -9,8 +9,9 @@
   allow the API/UDP port through the private-network firewall when remote
   forwarding is enabled.
 
-The current repository produces signed/unsigned binaries through the release
-workflow; a `.dmg` and NSIS/MSI installer are not yet shipped.
+The repository produces signed/unsigned binaries through the release workflow.
+The Windows release artifact is an NSIS installer (`VKVM-Setup.exe`); an MSI
+source is also kept for environments that package WiX separately.
 
 ## First run
 
@@ -25,7 +26,11 @@ workflow; a `.dmg` and NSIS/MSI installer are not yet shipped.
 
 ## Startup and network behavior
 
-`Start on boot` installs a per-user macOS LaunchAgent or Windows Run entry.
+`Start on boot` installs a per-user macOS LaunchAgent or Windows Run entry. A
+fresh Windows installation enables this setting so the interactive companion
+appears after login; it can be disabled from Settings. The installer also
+registers the `VKVMCore` delayed-auto SCM service and adds Start Menu/Desktop
+shortcuts plus an uninstall entry.
 The entry passes `--companion`, so it does not start a second API/UDP listener;
 the companion negotiates protocol version and polls authenticated core status
 over local IPC.

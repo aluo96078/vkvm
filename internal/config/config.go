@@ -260,6 +260,10 @@ func ClassifyChange(before, after *Config) ChangeSummary {
 // DefaultConfig returns a new Config with sensible defaults
 func DefaultConfig() *Config {
 	identity, _ := security.NewIdentity()
+	// The Windows installer provisions a per-user companion alongside the
+	// machine-wide SCM core. A fresh Windows installation must keep that
+	// companion enabled at login; users can turn it off explicitly in the UI.
+	startOnBoot := runtime.GOOS == "windows"
 	return &Config{
 		Profiles: []Profile{
 			{
@@ -278,7 +282,7 @@ func DefaultConfig() *Config {
 			DeviceID:             newDeviceID(),
 			IdentityPublicKey:    identity.PublicString(),
 			IdentityPrivateKey:   identity.PrivateString(),
-			StartOnBoot:          false,
+			StartOnBoot:          startOnBoot,
 			StartMinimized:       true,
 			ShowNotifications:    true,
 			CurrentProfile:       "PC1",
@@ -335,24 +339,37 @@ func NewManagerAt(configPath string) (*Manager, error) {
 // getConfigPath returns the path to the configuration file
 func getConfigPath() (string, error) {
 	var configDir string
+	if override := os.Getenv("VKVM_CONFIG_DIR"); override != "" {
+		configDir = override
+	}
 
-	switch runtime.GOOS {
-	case "darwin":
+	switch {
+	case configDir != "":
+		// Explicit path is used by packaging/tests that need an isolated store.
+	case runtime.GOOS == "darwin":
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err
 		}
 		configDir = filepath.Join(home, "Library", "Application Support", "vkvm")
-	case "windows":
-		appData := os.Getenv("APPDATA")
-		if appData == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return "", err
+	case runtime.GOOS == "windows":
+		// The SCM core normally runs as LocalSystem while the companion runs in
+		// the logged-in user's session. A machine-wide owner directory keeps
+		// both processes on one configuration snapshot; the installer grants
+		// the active user access while LocalSystem retains full control.
+		if programData := os.Getenv("ProgramData"); programData != "" {
+			configDir = filepath.Join(programData, "VKVM")
+		} else {
+			appData := os.Getenv("APPDATA")
+			if appData == "" {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return "", err
+				}
+				appData = filepath.Join(home, "AppData", "Roaming")
 			}
-			appData = filepath.Join(home, "AppData", "Roaming")
+			configDir = filepath.Join(appData, "vkvm")
 		}
-		configDir = filepath.Join(appData, "vkvm")
 	default:
 		home, err := os.UserHomeDir()
 		if err != nil {

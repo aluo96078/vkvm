@@ -4,6 +4,9 @@ $nsi = Get-Content (Join-Path $Root "packaging\windows\vkvm.nsi") -Raw
 $service = Get-Content (Join-Path $Root "packaging\windows\install-service.ps1") -Raw
 if ($nsi -notmatch 'VKVMCore' -or $nsi -notmatch 'delayed-auto') { throw "NSIS service policy missing" }
 if ($service -notmatch 'failure' -or $service -notmatch 'restart') { throw "SCM recovery policy missing" }
+if ($nsi -notmatch 'CreateShortCut' -or $nsi -notmatch 'CurrentVersion.*Run' -or $nsi -notmatch '--enable-autostart') { throw "interactive startup shortcut policy missing" }
+if ($nsi -notmatch 'WriteUninstaller' -or $nsi -notmatch 'InstallLocation') { throw "uninstall metadata missing" }
+if ($nsi -notmatch 'sc\.exe.*start VKVMCore') { throw "service start command missing" }
 $autostart = Get-Content (Join-Path $Root "internal\autostart\autostart_windows.go") -Raw
 if ($autostart -notmatch '--companion') { throw "companion startup argument missing" }
 if (-not (Test-Path (Join-Path $Root "dist\vkvm.exe"))) { throw "Windows binary missing" }
