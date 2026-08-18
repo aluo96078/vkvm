@@ -229,6 +229,12 @@ func runCompanion(cfgMgr *config.Manager) {
 			return service.IPCEnvelope{}, callErr
 		}
 		if response.Type == "error" {
+			var detail struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(response.Payload, &detail); err == nil && detail.Error != "" {
+				return service.IPCEnvelope{}, fmt.Errorf("core IPC rejected %s: %s", request.Type, detail.Error)
+			}
 			return service.IPCEnvelope{}, fmt.Errorf("core IPC rejected %s", request.Type)
 		}
 		return response, nil
@@ -778,6 +784,7 @@ func runServiceContextMode(cfgMgr *config.Manager, parent context.Context, inter
 					return service.IPCEnvelope{}, errors.New("invalid switch payload")
 				}
 				if err := sw.SwitchToProfile(payload.Profile); err != nil {
+					log.Printf("Companion switch request for %q failed: %v", payload.Profile, err)
 					return service.IPCEnvelope{}, err
 				}
 				return service.IPCEnvelope{Type: "ok", RequestID: request.RequestID}, nil
