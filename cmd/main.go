@@ -153,15 +153,26 @@ func handleSwitch(cfgMgr *config.Manager, profileName string) {
 }
 
 func runUI(cfgMgr *config.Manager) {
-	runUIWithHandlers(cfgMgr, nil, nil)
+	runUIWithSwitcher(cfgMgr, nil, nil, nil)
 }
 
 func runUIWithHandlers(cfgMgr *config.Manager, onConfigSaved func(*config.Config) error, onSwitchProfile func(string) error) {
-	// Create switcher for the UI
-	sw, err := switcher.New(cfgMgr)
-	if err != nil {
-		log.Printf("Failed to create switcher: %v", err)
-		return
+	runUIWithSwitcher(cfgMgr, nil, onConfigSaved, onSwitchProfile)
+}
+
+// runUIWithSwitcher starts the settings server with an optional existing
+// Switcher. The interactive core owns the only network session; reusing it
+// prevents the UI from creating a second Agent WebSocket with stale
+// credentials and reporting a false disconnected status.
+func runUIWithSwitcher(cfgMgr *config.Manager, existing *switcher.Switcher, onConfigSaved func(*config.Config) error, onSwitchProfile func(string) error) {
+	sw := existing
+	if sw == nil {
+		var err error
+		sw, err = switcher.New(cfgMgr)
+		if err != nil {
+			log.Printf("Failed to create switcher: %v", err)
+			return
+		}
 	}
 
 	// Start the UI server
@@ -1568,7 +1579,7 @@ func runServiceContextMode(cfgMgr *config.Manager, parent context.Context, inter
 					return
 				}
 				log.Printf("Hotkey: Opening Settings UI...")
-				go runUI(cfgMgr)
+				go runUIWithSwitcher(cfgMgr, sw, nil, nil)
 			})
 			if err != nil {
 				log.Printf("Warning: failed to register settings hotkey: %v", err)
@@ -1582,7 +1593,7 @@ func runServiceContextMode(cfgMgr *config.Manager, parent context.Context, inter
 						return
 					}
 					log.Printf("Hotkey: Opening Settings UI...")
-					go runUI(cfgMgr)
+					go runUIWithSwitcher(cfgMgr, sw, nil, nil)
 				})
 			}
 		}
@@ -1719,7 +1730,7 @@ func runServiceContextMode(cfgMgr *config.Manager, parent context.Context, inter
 	t.AddSeparator()
 
 	t.AddMenuItem("Settings...", func() {
-		go runUI(cfgMgr)
+		go runUIWithSwitcher(cfgMgr, sw, nil, nil)
 	})
 
 	t.AddSeparator()

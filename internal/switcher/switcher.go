@@ -444,6 +444,19 @@ func (s *Switcher) AgentTransportState() network.ConnectionState {
 	return client.State()
 }
 
+// AgentTransportError returns the latest connection diagnostic for the single
+// Agent WebSocket session. Hosts and agents before their first dial return an
+// empty string.
+func (s *Switcher) AgentTransportError() string {
+	s.mu.Lock()
+	client := s.wsClient
+	s.mu.Unlock()
+	if client == nil {
+		return ""
+	}
+	return client.LastError()
+}
+
 // Close stops the agent transport, if one is running. Host instances have no
 // transport and Close is a no-op.
 func (s *Switcher) Close() {

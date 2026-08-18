@@ -389,12 +389,17 @@ func (s *Server) handleSyncTo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConnectionStatus(w http.ResponseWriter, r *http.Request) {
+	if s.switcher == nil {
+		http.Error(w, "switcher unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	connected := s.switcher.IsConnectedToCheck()
 	state := s.switcher.AgentTransportState()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"connected": connected,
 		"state":     state,
+		"error":     s.switcher.AgentTransportError(),
 	})
 }
 
@@ -861,11 +866,17 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                     el.style.color = '#fbbf24';
                     el.style.border = '1px solid rgba(245, 158, 11, 0.3)';
                     el.innerHTML = '⏸ Waiting for network change';
+                } else if (data.state === 'connecting') {
+                    el.style.background = 'rgba(59, 130, 246, 0.2)';
+                    el.style.color = '#93c5fd';
+                    el.style.border = '1px solid rgba(59, 130, 246, 0.3)';
+                    el.innerHTML = '⏳ Connecting to Host';
                 } else {
                     el.style.background = 'rgba(239, 68, 68, 0.2)';
                     el.style.color = '#f87171';
                     el.style.border = '1px solid rgba(239, 68, 68, 0.3)';
-                    el.innerHTML = '❌ Disconnected';
+                    const detail = data.error ? '<br><small>' + escapeHtml(data.error) + '</small>' : '';
+                    el.innerHTML = '❌ Disconnected' + detail;
                 }
             } catch (e) {
                 // Ignore errors
@@ -1098,10 +1109,13 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
                         <div>
                             <strong>${escapeHtml(h.ip)}</strong> <span style="color: #94a3b8;">(Port: ${escapeHtml(h.port)})</span>
                             <div style="font-size: 0.8rem; color: #a5b4fc;">Profile: ${escapeHtml(h.current_profile || 'None')}</div>
+                            <div style="font-size: 0.8rem; color: #c4b5fd;">Role: ${escapeHtml(h.role || 'unknown')}</div>
+                            ${h.device_id ? '<div style="font-size: 0.75rem; color: #94a3b8;">Device: ' + escapeHtml(h.device_id) + '</div>' : ''}
+                            ${h.role && h.role !== 'host' ? '<div style="font-size: 0.8rem; color: #fbbf24;">This device is not a Host; Agent connections will be rejected.</div>' : ''}
                         </div>
                         <div style="display: flex; gap: 0.5rem; align-items: center;">
-                            <button class="btn btn-small btn-secondary" onclick="addRemoteFromDiscovery(${jsArg(h.ip + ':' + h.port)})">Add as Remote</button>
-                            <button class="btn btn-small" style="background: #4f46e5;" onclick="syncConfigTo(${jsArg(h.ip + ':' + h.port)})">☁️ Sync Config</button>
+                            <button class="btn btn-small btn-secondary" ${h.role && h.role !== 'host' ? 'disabled title="Only a Host can be a coordinator"' : ''} onclick="addRemoteFromDiscovery(${jsArg(h.ip + ':' + h.port)})">Add as Remote</button>
+                            <button class="btn btn-small" style="background: #4f46e5;" ${h.role && h.role !== 'host' ? 'disabled title="Only a Host can be a coordinator"' : ''} onclick="syncConfigTo(${jsArg(h.ip + ':' + h.port)})">☁️ Sync Config</button>
                         </div>
                     </div>
                 ` + "`" + `).join('');

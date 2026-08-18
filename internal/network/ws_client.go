@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -47,6 +48,7 @@ type WSClient struct {
 	callbackMu   sync.RWMutex
 	isConnected  bool
 	state        ConnectionState
+	lastError    string
 	closed       bool
 	closeOnce    sync.Once
 	dialCancel   context.CancelFunc
@@ -237,6 +239,16 @@ func (c *WSClient) setState(state ConnectionState) {
 	c.mu.Unlock()
 }
 
+func (c *WSClient) setLastError(err error) {
+	c.mu.Lock()
+	if err == nil {
+		c.lastError = ""
+	} else {
+		c.lastError = err.Error()
+	}
+	c.mu.Unlock()
+}
+
 func (c *WSClient) connect() {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.mu.Lock()
@@ -258,17 +270,23 @@ func (c *WSClient) connect() {
 	c.mu.Unlock()
 	if token == "" {
 		c.setState(ConnectionDisconnected)
+		err := fmt.Errorf("API token is empty")
+		c.setLastError(err)
 		log.Printf("WS Client: refusing unauthenticated connection to %s", hostAddr)
 		return
 	}
 	if hostAddr == "" {
 		c.setState(ConnectionWaitingForNetwork)
+		c.setLastError(fmt.Errorf("coordinator address is empty"))
 		return
 	}
 	u := url.URL{Scheme: "ws", Host: hostAddr, Path: "/ws"}
 	header.Set("Authorization", "Bearer "+token)
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, u.String(), header)
 	if err != nil {
+		c.setState(ConnectionDisconnected)
+		c.setLastError(fmt.Errorf("connect to %s failed: %w", hostAddr, err))
+		log.Printf("WS Client: connection to %s failed: %v", hostAddr, err)
 		return
 	}
 	defer conn.Close()
@@ -290,6 +308,7 @@ func (c *WSClient) connect() {
 	capabilities := c.capabilities
 	c.sessionKey = protocol.DeriveSessionKey(token, deviceID, sessionID)
 	c.mu.Unlock()
+	c.setLastError(nil)
 
 	// Send Auth/Handshake immediately
 	// For now we assume open or token header, but let's send an Identify if needed.
@@ -310,7 +329,14 @@ func (c *WSClient) connect() {
 		c.writePump(conn)
 	}()
 
-	c.readPump(conn)
+	readErr := c.readPump(conn)
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if readErr != nil && !closed {
+		c.setLastError(fmt.Errorf("connection closed: %w", readErr))
+		log.Printf("WS Client: connection to %s closed: %v", hostAddr, readErr)
+	}
 
 	// Cleanup
 	// Closing the connection unblocks the writer if the reader noticed the
@@ -344,7 +370,7 @@ func NewSessionID() string {
 	return hex.EncodeToString(buf)
 }
 
-func (c *WSClient) readPump(conn *websocket.Conn) {
+func (c *WSClient) readPump(conn *websocket.Conn) error {
 	conn.SetReadLimit(4096)
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	conn.SetPongHandler(func(string) error { conn.SetReadDeadline(time.Now().Add(60 * time.Second)); return nil })
@@ -352,7 +378,7 @@ func (c *WSClient) readPump(conn *websocket.Conn) {
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
-			break
+			return err
 		}
 
 		var msg protocol.Message
@@ -364,7 +390,7 @@ func (c *WSClient) readPump(conn *websocket.Conn) {
 		c.mu.Unlock()
 		if !protocol.VerifyMessage(msg, key) {
 			log.Printf("WS Client: rejecting invalid or unauthenticated message")
-			break
+			return fmt.Errorf("invalid or unauthenticated message")
 		}
 
 		c.handleMessage(msg)
@@ -628,6 +654,14 @@ func (c *WSClient) State() ConnectionState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.state
+}
+
+// LastError returns the most recent connection error, if any. It is intended
+// for diagnostics and never contains authentication headers or token values.
+func (c *WSClient) LastError() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastError
 }
 
 // SessionID returns the authenticated transport session currently used by the
