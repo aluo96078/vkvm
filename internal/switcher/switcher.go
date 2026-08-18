@@ -283,6 +283,42 @@ func (s *Switcher) SwitchLocalOnly(profileName string) error {
 	return s.switchToProfileInternal(profile, profileName, false)
 }
 
+// resolveProfileMonitorInputs maps a profile's saved monitor identifiers to
+// the monitors that are present now. Profiles can outlive a Windows display
+// driver refresh, which leaves stale Monitor IDs and older DeviceName aliases
+// in the saved map. Those stale entries must not block switching the monitors
+// that are actually connected; each active monitor is still switched at most
+// once, using the first matching identifier in the stable priority order.
+func resolveProfileMonitorInputs(active []ddc.Monitor, configured map[string]int) map[string]ddc.InputSource {
+	resolved := make(map[string]ddc.InputSource)
+	for _, monitor := range active {
+		canonical := monitor.ID
+		if canonical == "" {
+			canonical = monitor.DeviceName
+		}
+		if canonical == "" {
+			canonical = monitor.Name
+		}
+		if canonical == "" {
+			continue
+		}
+		if _, exists := resolved[canonical]; exists {
+			continue
+		}
+		keys := []string{monitor.ID, monitor.DeviceName, monitor.Name, monitor.Serial}
+		for _, key := range keys {
+			if key == "" {
+				continue
+			}
+			if source, ok := configured[key]; ok {
+				resolved[canonical] = ddc.InputSource(source)
+				break
+			}
+		}
+	}
+	return resolved
+}
+
 func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName string, allowForward bool) error {
 	cfg := s.configMgr.Get()
 
@@ -321,31 +357,21 @@ func (s *Switcher) switchToProfileInternal(profile *config.Profile, profileName 
 		if err != nil {
 			return fmt.Errorf("failed to detect monitors before switching: %w", err)
 		}
-		activeIDs := make(map[string]bool)
-		for _, m := range activeMonitors {
-			activeIDs[m.ID] = true
+		monitorInputs := resolveProfileMonitorInputs(activeMonitors, profile.MonitorInputs)
+		if len(profile.MonitorInputs) > 0 && len(monitorInputs) == 0 {
+			return fmt.Errorf("no configured monitors for profile %q are currently detected", profileName)
+		}
+		if stale := len(profile.MonitorInputs) - len(monitorInputs); stale > 0 {
+			log.Printf("Switcher: profile %q ignored %d stale monitor mapping(s)", profileName, stale)
 		}
 
 		var wg sync.WaitGroup
 		var errMu sync.Mutex
 
-		missing := 0
-		for monitorID := range profile.MonitorInputs {
-			if !activeIDs[monitorID] {
-				missing++
-			}
-		}
-		if len(profile.MonitorInputs) > 0 && missing == len(profile.MonitorInputs) {
-			return fmt.Errorf("no configured monitors for profile %q are currently detected", profileName)
-		}
-		if missing > 0 {
-			return fmt.Errorf("profile %q is missing %d configured monitor(s)", profileName, missing)
-		}
-
-		for monitorID, inputSource := range profile.MonitorInputs {
+		for monitorID, inputSource := range monitorInputs {
 
 			wg.Add(1)
-			go func(mid string, src int) {
+			go func(mid string, src ddc.InputSource) {
 				defer wg.Done()
 				if err := s.controller.SetInputSource(mid, ddc.InputSource(src)); err != nil {
 					log.Printf("Failed to switch monitor %s: %v", mid, err)
