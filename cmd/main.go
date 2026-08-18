@@ -275,6 +275,10 @@ func runCompanion(cfgMgr *config.Manager) {
 		log.Printf("Companion: initial configuration sync failed: %v", err)
 		return
 	}
+	// The Windows core runs as a non-interactive SCM service. Requesting UAC
+	// from that process cannot reliably reach the logged-in user's desktop, so
+	// the companion owns the post-login firewall prompt instead.
+	registerWindowsFirewallPrompt(cfgMgr)
 	if runtime.GOOS == "windows" {
 		applyCompanionAutostart := func() {
 			current := cfgMgr.Get()
@@ -519,6 +523,53 @@ func companionInputPayload(event input.InputEvent, deviceID, sessionID string, s
 		E1: event.E1, Repeat: event.Repeat, Sequence: sequence, SessionID: sessionID,
 		ClockNS: event.ClockNS,
 	}
+}
+
+// registerWindowsFirewallPrompt schedules a firewall rule check from an
+// interactive process. The delay lets the app/tray finish starting before a
+// possible UAC dialog appears. A failed or denied request is non-fatal: the
+// API remains available locally and the user can retry after restarting VKVM.
+//
+// The callback also covers enabling the API or changing its port later from
+// the settings UI. Service-mode cores deliberately do not call this helper;
+// only an interactive process should request elevation.
+func registerWindowsFirewallPrompt(cfgMgr *config.Manager) {
+	if runtime.GOOS != "windows" || cfgMgr == nil {
+		return
+	}
+
+	var mu sync.Mutex
+	lastRequestedPort := 0
+	apply := func() {
+		cfg := cfgMgr.Get()
+		if cfg == nil || !cfg.General.APIEnabled || cfg.General.APIPort <= 0 {
+			mu.Lock()
+			lastRequestedPort = 0
+			mu.Unlock()
+			return
+		}
+
+		port := cfg.General.APIPort
+		mu.Lock()
+		if lastRequestedPort == port {
+			mu.Unlock()
+			return
+		}
+		lastRequestedPort = port
+		mu.Unlock()
+
+		go func() {
+			timer := time.NewTimer(time.Second)
+			defer timer.Stop()
+			<-timer.C
+			if err := osutils.EnsureFirewallRule(port); err != nil {
+				log.Printf("Firewall warning: %v", err)
+			}
+		}()
+	}
+
+	cfgMgr.RegisterChangeCallback(apply)
+	apply()
 }
 
 // registerCommonShortcuts installs the settings, sleep, emergency and profile
@@ -889,16 +940,12 @@ func runServiceContextMode(cfgMgr *config.Manager, parent context.Context, inter
 		log.Printf("Transport credentials rotated; active sessions will re-authenticate")
 	}
 	cfgMgr.RegisterChangeCallback(applyTransportToken)
+	// Register this independently of the initial APIEnabled value so enabling
+	// the API later from Settings also gets the post-startup UAC prompt.
+	if runtime.GOOS == "windows" && interactive {
+		registerWindowsFirewallPrompt(cfgMgr)
+	}
 	if cfg.General.APIEnabled {
-		// New: Ensure firewall rule exists on Windows
-		if runtime.GOOS == "windows" {
-			go func() {
-				if err := osutils.EnsureFirewallRule(cfg.General.APIPort); err != nil {
-					log.Printf("Firewall warning: %v", err)
-				}
-			}()
-		}
-
 		apiServer = api.NewServer(cfgMgr, sw)
 		apiServer.SetPermissionProvider(input.CurrentPermissions)
 		apiServer.SetServiceStatusProvider(serviceStatus.Snapshot)

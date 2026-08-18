@@ -9,6 +9,12 @@
   allow the API/UDP port through the private-network firewall when remote
   forwarding is enabled.
 
+On Windows, VKVM does not request firewall elevation from the background SCM
+service. After the interactive app/companion starts, it checks the configured
+API port and shows a UAC prompt only when the firewall rule is missing or does
+not match. Declining the prompt does not stop VKVM; remote connections remain
+unavailable until the port is allowed or VKVM is restarted to try again.
+
 The repository produces signed/unsigned binaries through the release workflow.
 The Windows release artifact is an NSIS installer (`VKVM-Setup.exe`); an MSI
 source is also kept for environments that package WiX separately.

@@ -36,7 +36,7 @@ Hardware KVM switches that support 2+ monitors and 2+ computers are prohibitivel
 
 ### Windows
 - **ControlMyMonitor**: Bundled automatically (no separate install needed)
-- **Administrator Rights**: May be required for firewall rule creation
+- **Administrator Rights**: If the API port is not allowed, VKVM asks for UAC permission after the app starts to create the firewall rule
 - **DDC/CI Enabled**: Enable in your monitor's OSD settings
 
 ## Installation
