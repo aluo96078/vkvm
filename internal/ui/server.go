@@ -661,9 +661,9 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             </div>
             <div class="input-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 0.75rem;">
                 <div class="input-group">
-                    <label>API Token:</label>
+                    <label id="api-token-label">API Token:</label>
                     <input type="password" id="api-token" onchange="updateGeneralConfig()" placeholder="Required when API is enabled" autocomplete="new-password">
-                    <small style="color: #94a3b8; font-size: 0.8rem; margin-top: 0.25rem;">Leave blank to keep the saved token. Use the same token on paired agents.</small>
+                    <small id="api-token-help" style="color: #94a3b8; font-size: 0.8rem; margin-top: 0.25rem;">Leave blank to keep the saved token. Use the same token on paired agents.</small>
                 </div>
             </div>
             <div class="input-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
@@ -893,6 +893,19 @@ var tmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
             document.getElementById('agent-sync-notice').style.display = isAgent ? 'block' : 'none';
             document.getElementById('agent-settings').style.display = isAgent ? 'block' : 'none';
             document.getElementById('host-settings').style.display = isAgent ? 'none' : 'block';
+
+            const tokenLabel = document.getElementById('api-token-label');
+            const tokenInput = document.getElementById('api-token');
+            const tokenHelp = document.getElementById('api-token-help');
+            if (isAgent) {
+                tokenLabel.textContent = 'Remote API Token (Host):';
+                tokenInput.placeholder = 'Enter the Host API token';
+                tokenHelp.textContent = 'Required to connect to the Host. Enter exactly the same token configured on the Host.';
+            } else {
+                tokenLabel.textContent = 'API Token:';
+                tokenInput.placeholder = 'Required when API is enabled';
+                tokenHelp.textContent = 'Leave blank to keep the saved token. Use the same token on paired agents.';
+            }
 
             // Disable input capture checkbox if agent profile is set (dynamic control)
             const inputCaptureCheckbox = document.getElementById('input-capture-enabled');
