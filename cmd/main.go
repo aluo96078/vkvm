@@ -332,6 +332,58 @@ func runCompanion(cfgMgr *config.Manager) {
 		_, _ = call(service.IPCEnvelope{Type: "release_all", RequestID: "companion-release"})
 	}()
 
+	hkMgr := hotkey.NewManager()
+	if err := hkMgr.Start(); err != nil {
+		log.Printf("Companion: hotkey engine failed to start: %v", err)
+	}
+	var lastHkTime time.Time
+	var hkMu sync.Mutex
+	debounce := func() bool {
+		hkMu.Lock()
+		defer hkMu.Unlock()
+		if time.Since(lastHkTime) < 500*time.Millisecond {
+			return false
+		}
+		lastHkTime = time.Now()
+		return true
+	}
+	refreshShortcuts := func() {
+		current := cfgMgr.Get()
+		registerCommonShortcuts(
+			hkMgr,
+			current,
+			debounce,
+			func() { go runUI(cfgMgr) },
+			func() {
+				go func() {
+					time.Sleep(500 * time.Millisecond)
+					if err := osutils.TurnOffDisplay(); err != nil {
+						log.Printf("Companion: error sleeping displays: %v", err)
+					}
+				}()
+			},
+			func() {
+				if trap != nil {
+					trap.EnableCapture(false)
+				}
+				if _, err := call(service.IPCEnvelope{Type: "release_all", RequestID: "companion-hotkey-release"}); err != nil {
+					log.Printf("Companion: emergency release failed: %v", err)
+				}
+			},
+			func(profileName string) {
+				data, err := json.Marshal(map[string]string{"profile": profileName})
+				if err != nil {
+					return
+				}
+				if _, err := call(service.IPCEnvelope{Type: "switch", RequestID: "companion-hotkey-switch", Payload: data}); err != nil {
+					log.Printf("Companion: hotkey switch %q failed: %v", profileName, err)
+				}
+			},
+		)
+	}
+	refreshShortcuts()
+	cfgMgr.RegisterChangeCallback(refreshShortcuts)
+
 	trayApp := tray.New("VKVM Companion")
 	for _, profile := range cfg.Profiles {
 		profileName := profile.Name
@@ -398,7 +450,83 @@ func companionInputPayload(event input.InputEvent, deviceID, sessionID string, s
 	}
 }
 
+// registerCommonShortcuts installs the settings, sleep, emergency and profile
+// actions that are shared by the full interactive process and the split
+// companion. Platform-specific event capture is started separately by the
+// caller; this function only translates configured names into callbacks.
+func registerCommonShortcuts(
+	hkMgr *hotkey.Manager,
+	cfg *config.Config,
+	debounce func() bool,
+	openSettings func(),
+	sleepDisplays func(),
+	emergency func(),
+	switchProfile func(string),
+) {
+	if hkMgr == nil || cfg == nil {
+		return
+	}
+	hkMgr.Clear()
+	register := func(name string, callback func()) {
+		if strings.TrimSpace(name) == "" || callback == nil {
+			return
+		}
+		if _, err := hkMgr.Register(name, callback); err != nil {
+			log.Printf("Warning: failed to register hotkey %q: %v", name, err)
+		}
+	}
+	withDebounce := func(callback func()) func() {
+		return func() {
+			if debounce == nil || debounce() {
+				callback()
+			}
+		}
+	}
+	if cfg.General.Role == "host" && emergency != nil {
+		register(cfg.General.EscapeHotkey, emergency)
+	}
+	if openSettings != nil {
+		settings := withDebounce(openSettings)
+		register(cfg.General.SettingsHotkey, settings)
+		if runtime.GOOS == "darwin" && strings.Contains(strings.ToUpper(cfg.General.SettingsHotkey), "CTRL") {
+			register(strings.ReplaceAll(strings.ToUpper(cfg.General.SettingsHotkey), "CTRL", "CMD"), settings)
+		}
+	}
+	if sleepDisplays != nil {
+		sleep := withDebounce(sleepDisplays)
+		register(cfg.General.SleepHotkey, sleep)
+		if runtime.GOOS == "darwin" && strings.Contains(strings.ToUpper(cfg.General.SleepHotkey), "CTRL") {
+			register(strings.ReplaceAll(strings.ToUpper(cfg.General.SleepHotkey), "CTRL", "CMD"), sleep)
+		}
+	}
+	if switchProfile != nil {
+		for _, profile := range cfg.Profiles {
+			profileName := profile.Name
+			if strings.TrimSpace(profile.Hotkey) == "" || profileName == "" {
+				continue
+			}
+			switchCallback := withDebounce(func() { switchProfile(profileName) })
+			register(profile.Hotkey, switchCallback)
+			if runtime.GOOS == "darwin" && strings.Contains(strings.ToUpper(profile.Hotkey), "CTRL") {
+				register(strings.ReplaceAll(strings.ToUpper(profile.Hotkey), "CTRL", "CMD"), switchCallback)
+			}
+		}
+	}
+	log.Printf("Shortcuts: Refreshed %d profiles", len(cfg.Profiles))
+}
+
 func runService(cfgMgr *config.Manager) {
+	// AppKit requires NSApplication/status-item initialization on the process
+	// main thread. Supervisor.Run intentionally executes workers in a goroutine,
+	// which makes the macOS tray abort inside systray.registerSystray. LaunchAgent
+	// KeepAlive provides crash recovery for this interactive path; the core
+	// Supervisor remains in use by non-macOS service modes.
+	if runtime.GOOS == "darwin" {
+		if err := runServiceContext(cfgMgr, context.Background()); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("VKVM Service stopped: %v", err)
+		}
+		return
+	}
 	supervisor := service.NewSupervisor(
 		func(ctx context.Context) error { return runServiceContext(cfgMgr, ctx) },
 		nil,
