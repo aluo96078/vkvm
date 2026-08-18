@@ -1,7 +1,7 @@
 // Package autostart provides platform-specific auto-start registration.
 package autostart
 
-// Enable enables the interactive user-session companion to start at login.
+// Enable enables the interactive user-session process to start at login.
 func Enable() error { return enablePlatform() }
 
 // Disable removes the interactive user-session auto-start registration.

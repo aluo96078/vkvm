@@ -22,7 +22,6 @@ const macLaunchAgentPlist = `<?xml version="1.0" encoding="UTF-8"?>
     <key>ProgramArguments</key>
     <array>
         <string>{{xml .ExecutablePath}}</string>
-        <string>--companion</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -109,6 +108,12 @@ func enablePlatform() error {
 	}
 	if err := os.Rename(tmpPath, plistPath); err != nil {
 		return err
+	}
+	// A LaunchAgent process applies its own configuration during startup. Do
+	// not boot it out and kickstart it from inside itself: that creates a
+	// restart loop and prevents the interactive hotkey process from settling.
+	if os.Getenv("XPC_SERVICE_NAME") == "com.vkvm.agent" {
+		return nil
 	}
 
 	domain := "gui/" + strconv.Itoa(os.Getuid())

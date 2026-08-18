@@ -19,6 +19,9 @@ func TestRenderLaunchAgentPlistKeepsMarkupAndEscapesValues(t *testing.T) {
 	if strings.Contains(plist, "&lt;") || strings.Contains(plist, "&gt;") {
 		t.Fatalf("plist markup contains HTML entities: %s", plist)
 	}
+	if strings.Contains(plist, "--companion") {
+		t.Fatalf("macOS LaunchAgent must start the interactive process, not the Windows companion mode: %s", plist)
+	}
 	if !strings.Contains(plist, "/Users/test&amp;name/VKVM.app/Contents/MacOS/vkvm") {
 		t.Fatalf("executable path was not XML escaped: %s", plist)
 	}
